@@ -1,198 +1,157 @@
-# @zcash-agent/toolkit
+# Zcash Agent Toolkit
 
-AI agent communication toolkit over Zcash shielded memo fields.
+**Private AI agent communication over Zcash shielded memos.**
 
-Turn Zcash's 512-byte encrypted memo field into a structured communication protocol for AI agents, with built-in support for bounty/task workflows.
+AI agents need to talk to each other. But every existing transport — HTTP, WebSockets, message queues — leaks metadata: who's talking, when, how often, and to whom. Zcash shielded memos fix this. On-chain, all memos look identical. No observer can tell which agents are communicating or what they're saying.
 
-## Features
+This toolkit gives agents a complete encrypted communication stack built on Zcash's 512-byte memo field:
 
-- **Structured 512-byte memo protocol** with automatic chunking for large messages
-- **BLAKE3** hashing, KDF, and content integrity verification (v1.8.3, WASM SIMD optimized)
-- **X25519** Diffie-Hellman key exchange for agent-to-agent session establishment
-- **ChaCha20-Poly1305** authenticated encryption
-- **Task/bounty workflow**: assign tasks, submit proofs, confirm payments
-- **TypeScript SDK** with clean async API, published as `@zcash-agent/toolkit`
-- **250 KB WASM binary** (release build with LTO)
+- **Structured protocol** — 60-byte header + 452-byte payload with automatic chunking for large messages
+- **End-to-end encryption** — X25519 key exchange + ChaCha20-Poly1305, on top of Zcash's native shielded encryption
+- **Forward secrecy** — BLAKE3-based symmetric ratchet. Old keys are zeroized. Compromising today's key reveals nothing about yesterday's messages.
+- **Key rotation** — Per-session keypair rotation with previous-key fallback for in-flight messages
+- **Zcash key derivation** — Agent identity derived from seed via domain-separated BLAKE3 KDF, tying agents to Zcash addresses
+- **Task/bounty workflows** — Built-in TaskAssign → TaskProof → PaymentConfirm protocol with anti-replay nonces
+- **Rust + WASM + TypeScript** — Use from any environment
 
-## Quick Start
+## Quick Example
 
 ```typescript
-import { AgentSession, TaskManager } from '@zcash-agent/toolkit';
+import { AgentSession, MemoCodec, TaskManager } from '@zcash-agent/toolkit';
 
 // Two agents establish an encrypted session
 const alice = await AgentSession.create();
 const bob = await AgentSession.create();
 
-// Exchange handshakes (these produce hex strings ready for zcash-cli z_sendmany)
-const { handshake: aliceHS, memos: aliceMemos } = await alice.createHandshake(['text', 'task']);
-const { handshake: bobHS, memos: bobMemos } = await bob.createHandshake(['text']);
+// Exchange public keys (via initial shielded memo)
+const aliceHandshake = alice.createHandshake('alice-agent', ['task-execution']);
+const bobHandshake = bob.createHandshake('bob-agent', ['task-assignment']);
 
-// Process handshakes and derive shared secrets
-const receivedBob = await alice.processHandshake(bobMemos);
-const receivedAlice = await bob.processHandshake(aliceMemos);
-await alice.deriveSharedSecret(receivedBob.public_key);
-await bob.deriveSharedSecret(receivedAlice.public_key);
+// Derive shared secret from Diffie-Hellman
+alice.deriveSharedSecret(bob.publicKey());
+bob.deriveSharedSecret(alice.publicKey());
 
-// Send encrypted commands
-const memos = await alice.sendCommand({ action: 'ping', data: 'Hello!' });
-const received = await bob.receiveCommand(memos);
-// received = { action: 'ping', data: 'Hello!' }
+// Encrypt a command — ready to embed in a Zcash shielded memo
+const encrypted = alice.encrypt('Execute privacy audit on contract 0x...');
+const decrypted = bob.decrypt(encrypted);
+
+// Task workflow with payment
+const task = TaskManager.assignTask(alice, {
+  description: 'Audit smart contract for privacy leaks',
+  reward: '0.5 ZEC',
+  deadline: Date.now() + 86400000,
+});
+
+const proof = TaskManager.submitProof(bob, task, {
+  result: 'No privacy leaks found. Full report attached.',
+  evidence: 'ipfs://Qm...',
+});
+
+const payment = TaskManager.confirmPayment(alice, proof, {
+  txid: 'zcash-tx-hash...',
+  amount: '0.5 ZEC',
+});
 ```
 
-## Memo Protocol Format
+## Demo
 
-Each memo is exactly 512 bytes:
-
-```
-[0]       version (0x01)
-[1]       message type
-[2..18]   session ID (16 bytes)
-[18..20]  chunk index (u16 BE)
-[20..22]  total chunks (u16 BE)
-[22..54]  BLAKE3 content hash (32 bytes)
-[54..512] payload (458 bytes, zero-padded)
-```
-
-Messages larger than 458 bytes are automatically chunked across multiple memos.
-
-## Message Types
-
-| Type | Byte | Description |
-|------|------|-------------|
-| Handshake | `0x01` | Key exchange initiation |
-| Text | `0x02` | Plain text message |
-| Command | `0x03` | Structured JSON command |
-| Response | `0x04` | Command response |
-| Ack | `0x05` | Acknowledgement |
-| Close | `0x06` | Session termination |
-| Binary | `0x07` | Raw binary data |
-| TaskAssign | `0x10` | Bounty task assignment |
-| TaskProof | `0x11` | Proof of task completion |
-| PaymentConfirm | `0x12` | ZEC payment confirmation |
+Open [`demo/index.html`](demo/index.html) in a browser to see a visual simulation of two agents communicating over shielded memos.
 
 ## Architecture
 
 ```
-zcash-agent-toolkit/
-  crates/
-    memo-codec/          # 512-byte memo encode/decode, chunking, reassembly
-    crypto-primitives/   # BLAKE3, X25519, ChaCha20-Poly1305, random
-    address-utils/       # Zcash address classification, agent ID generation
-    agent-protocol/      # Handshake, task/bounty, encrypted relay
-    wasm-bindings/       # WASM facade (wasm-bindgen wrappers)
-  ts-sdk/                # TypeScript SDK (@zcash-agent/toolkit)
-  examples/              # Demo scripts
+┌──────────────────────────────────────────────────────┐
+│                  TypeScript SDK                       │
+│  AgentSession │ MemoCodec │ TaskManager               │
+│  SecureSession │ RotatingKeys │ deriveAgentFromSeed   │
+├──────────────┬──────────────┬────────────────────────┤
+│              │  WASM Bindings (wasm-bindgen)          │
+├──────────────┼──────────────┼────────────────────────┤
+│  memo-codec  │   crypto-    │  agent-protocol        │
+│              │  primitives  │                         │
+│  512-byte    │  BLAKE3      │  Handshake             │
+│  encode/     │  X25519      │  Task/Bounty           │
+│  decode      │  ChaCha20    │  Encrypted relay       │
+│  chunking    │  Ratchet     │                         │
+│  reassembly  │  Rotation    │  address-utils         │
+│              │  Zeroize     │  Zcash key derivation  │
+└──────────────┴──────────────┴────────────────────────┘
 ```
 
-All library crates are pure Rust. The `wasm-bindings` facade crate is the only one with `wasm-bindgen` dependency, keeping the architecture clean.
+## Security Properties
+
+| Property | How |
+|---|---|
+| **Confidentiality** | Zcash shielded encryption + ChaCha20-Poly1305 |
+| **Integrity** | BLAKE3 content hash in every memo header |
+| **Forward secrecy** | Symmetric ratchet with chain key zeroization |
+| **Authentication** | X25519 Diffie-Hellman key exchange |
+| **Anti-replay** | Nonces on task messages + consumed key tracking |
+| **Metadata privacy** | All memos zero-padded to exactly 512 bytes |
+| **Key hygiene** | Zeroize on drop for all secret material |
+
+## Message Types
+
+| Type | Code | Use Case |
+|---|---|---|
+| Handshake | 0x01 | Exchange public keys and capabilities |
+| Text | 0x02 | General encrypted messages |
+| Command | 0x03 | Agent instructions |
+| Response | 0x04 | Command results |
+| Ack | 0x05 | Delivery confirmation |
+| Close | 0x06 | Session termination |
+| Binary | 0x07 | Arbitrary binary data |
+| TaskAssign | 0x10 | Assign work with reward |
+| TaskProof | 0x11 | Submit proof of completion |
+| PaymentConfirm | 0x12 | Confirm ZEC payment |
+
+## Wire Format
+
+Every Zcash memo is exactly 512 bytes:
+
+```
+[0]       Protocol version (0x01)
+[1]       Message type
+[2..18]   Session ID (16 bytes)
+[18..20]  Chunk index (u16 BE)
+[20..22]  Total chunks (u16 BE)
+[22..54]  BLAKE3 content hash (32 bytes)
+[54..56]  Payload length (u16 BE)
+[56..60]  Reserved (4 bytes, 0x00)
+[60..512] Payload (452 bytes, zero-padded)
+```
+
+Messages larger than 452 bytes are automatically chunked across multiple memos with the same session ID and content hash. The reassembly buffer handles out-of-order delivery.
 
 ## Building
-
-### Prerequisites
-
-- Rust (stable)
-- wasm-pack
-- Node.js 18+
-
-### Full build
-
-```bash
-# Linux/macOS
-./build.sh
-
-# Windows
-.\build.ps1
-```
-
-### Manual steps
 
 ```bash
 # Rust tests
 cargo test --workspace
 
-# WASM build
-wasm-pack build crates/wasm-bindings --target web --out-dir ../../ts-sdk/wasm-pkg
+# Build WASM
+wasm-pack build crates/wasm-bindings --target web --out-dir ../../ts-sdk/wasm-pkg --release
 
-# TypeScript SDK
-cd ts-sdk && npm install && npm run build:ts
-```
-
-## Examples
-
-```bash
+# TypeScript
 cd ts-sdk
-npx tsx ../examples/agent-handshake.ts    # Two agents establish encrypted session
-npx tsx ../examples/task-bounty.ts        # Full bounty workflow
-npx tsx ../examples/privacyclaw-demo.ts   # PrivacyClaw-style agent simulation
+npm install
+npx tsup
+npm test
 ```
 
-## API Reference
+## Test Coverage
 
-### `AgentSession`
+- **115 Rust tests** across 5 crates (codec, crypto, address, protocol, WASM)
+- **70 TypeScript tests** across 7 test files
+- Forward secrecy proofs, replay rejection, key rotation, full protocol simulations
 
-Full encrypted agent session with keypair management.
+## Related Work
 
-```typescript
-const session = await AgentSession.create();
-session.publicKey;     // X25519 public key hex
-session.agentId;       // Deterministic BLAKE3-based agent ID
-session.sessionId;     // Random 16-byte session ID hex
-await session.deriveSharedSecret(peerPublicKeyHex);
-session.encrypt(plaintext);
-session.decrypt(encryptedHex);
-await session.createHandshake(capabilities?);
-await session.processHandshake(memoHexArray);
-await session.sendCommand(object);
-await session.receiveCommand(memoHexArray);
-```
-
-### `MemoCodec`
-
-Low-level memo encoding/decoding.
-
-```typescript
-const codec = await MemoCodec.create();
-codec.sessionId;                        // hex string
-codec.encodeText('hello');              // string[] (hex memos)
-codec.encodeCommand({ action: 'do' }); // string[]
-codec.encodeBinary(data);              // string[]
-await MemoCodec.decode(hexMemos);       // DecodedMessage
-```
-
-### `TaskManager`
-
-Bounty workflow helpers.
-
-```typescript
-await TaskManager.assignTask(sessionId, task);
-await TaskManager.submitProof(sessionId, proof);
-await TaskManager.confirmPayment(sessionId, payment);
-await TaskManager.createTaskProof(taskId, action, proofData, timestamp);
-await TaskManager.processTaskMessage(memoHexArray);
-```
-
-### Crypto Utilities
-
-```typescript
-await blake3Hash(data);                    // Uint8Array (32 bytes)
-await blake3Hex(data);                     // hex string
-await blake3DeriveKey(context, ikm);       // Uint8Array (32 bytes)
-await blake3KeyedHash(key, data);          // Uint8Array (32 bytes)
-await randomBytes(len);                    // Uint8Array
-await randomHex(byteLen);                 // hex string
-await generateSessionId();                 // Uint8Array (16 bytes)
-```
-
-### Address Utilities
-
-```typescript
-await classifyAddress('zs1...');  // "Sapling"
-await supportsMemos('t1...');     // false
-await isShielded('u1...');        // true
-await validateAddress('zs1...');  // true
-await agentIdFromPubkey(pubkey);  // deterministic hex ID
-```
+- **[BLAKE3 WASM](https://lamb356.github.io/blake3-wasm/)** — Browser BLAKE3 implementation (collaboration with Zooko Wilcox)
+- **FROST Multi-Sig UI** — Threshold cryptography interface for Zcash
+- **PCZT Tooling** — Partially Constructed Zcash Transaction RPC methods
+- **Zchat / zsend.xyz** — Private messenger built on Zcash memos (potential integration)
 
 ## License
 
-MIT OR Apache-2.0
+MIT

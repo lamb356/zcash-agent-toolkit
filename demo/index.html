@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zcash Agent Toolkit - Interactive Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --text: #e0e0e8;
+    --text-dim: #888;
+    --blue: #3b82f6;
+    --blue-dim: #1e3a5f;
+    --purple: #8b5cf6;
+    --purple-dim: #3b2a6e;
+    --green: #22c55e;
+    --chain-bg: #1a1a2e;
+    --mono: 'Courier New', Consolas, monospace;
+    --sans: system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  header {
+    text-align: center;
+    padding: 1.5rem 1rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: -0.02em; }
+  header h1 span { color: var(--blue); }
+  header p { color: var(--text-dim); font-size: 0.85rem; margin-top: 0.3rem; }
+
+  .controls {
+    display: flex; gap: 0.5rem; justify-content: center; align-items: center;
+    padding: 0.75rem 1rem; flex-wrap: wrap;
+  }
+  .controls button, .controls input {
+    font-family: var(--sans); font-size: 0.8rem;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); color: var(--text);
+    padding: 0.4rem 0.8rem; cursor: pointer; transition: border-color 0.2s;
+  }
+  .controls button:hover { border-color: var(--blue); }
+  .controls input { width: 220px; outline: none; }
+  .controls input:focus { border-color: var(--blue); }
+  .controls label { font-size: 0.8rem; color: var(--text-dim); cursor: pointer; display: flex; align-items: center; gap: 0.3rem; }
+  .controls input[type="checkbox"] { width: auto; cursor: pointer; accent-color: var(--blue); }
+
+  .arena {
+    display: grid;
+    grid-template-columns: 1fr 280px 1fr;
+    gap: 0;
+    min-height: calc(100vh - 180px);
+    padding: 0.5rem;
+  }
+
+  .agent {
+    padding: 1rem;
+    display: flex; flex-direction: column; gap: 0.75rem;
+  }
+
+  .agent-header {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding-bottom: 0.5rem; border-bottom: 2px solid;
+  }
+  .agent-alpha .agent-header { border-color: var(--blue); }
+  .agent-beta .agent-header { border-color: var(--purple); }
+
+  .agent-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.9rem; font-weight: 700;
+  }
+  .agent-alpha .agent-icon { background: var(--blue-dim); color: var(--blue); }
+  .agent-beta .agent-icon { background: var(--purple-dim); color: var(--purple); }
+
+  .agent-name { font-weight: 600; font-size: 0.95rem; }
+  .agent-alpha .agent-name { color: var(--blue); }
+  .agent-beta .agent-name { color: var(--purple); }
+
+  .agent-status {
+    font-size: 0.75rem; color: var(--text-dim);
+    font-family: var(--mono);
+    min-height: 1.2em;
+  }
+
+  .key-display {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem 0.6rem;
+    font-family: var(--mono); font-size: 0.7rem;
+    color: var(--text-dim); word-break: break-all;
+    opacity: 0; transition: opacity 0.5s;
+  }
+  .key-display.visible { opacity: 1; }
+  .key-display .label { color: var(--text); font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.2rem; }
+
+  .message-log {
+    flex: 1; display: flex; flex-direction: column; gap: 0.4rem;
+    overflow-y: auto; max-height: 400px;
+  }
+
+  .log-entry {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.5rem 0.6rem;
+    font-size: 0.75rem; opacity: 0;
+    animation: fadeIn 0.4s ease forwards;
+  }
+  .log-entry .log-type {
+    font-family: var(--mono); font-size: 0.65rem;
+    text-transform: uppercase; letter-spacing: 0.05em;
+    margin-bottom: 0.2rem;
+  }
+  .agent-alpha .log-entry .log-type { color: var(--blue); }
+  .agent-beta .log-entry .log-type { color: var(--purple); }
+  .log-entry .log-content { color: var(--text); }
+  .log-entry .log-hex {
+    font-family: var(--mono); font-size: 0.65rem;
+    color: var(--text-dim); margin-top: 0.2rem;
+    display: none; word-break: break-all;
+  }
+  .show-raw .log-entry .log-hex { display: block; }
+
+  .blockchain {
+    background: var(--chain-bg);
+    background-image:
+      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 20px 20px;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    padding: 0.5rem;
+    display: flex; flex-direction: column; gap: 0.5rem;
+    overflow-y: auto;
+  }
+
+  .chain-header {
+    text-align: center; padding: 0.4rem;
+    font-size: 0.75rem; font-weight: 600;
+    color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-bottom: 1px solid var(--border);
+  }
+  .chain-header .chain-icon { font-size: 1rem; display: block; margin-bottom: 0.2rem; }
+
+  .memo-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.6rem;
+    font-size: 0.7rem;
+    opacity: 0;
+    transform: translateY(-20px);
+    animation: memoSlide 0.6s ease forwards;
+  }
+  .memo-card.from-alpha { border-top: 2px solid var(--blue); }
+  .memo-card.from-beta { border-top: 2px solid var(--purple); }
+
+  .memo-card .memo-label {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 0.3rem;
+  }
+  .memo-card .memo-label .memo-id { font-weight: 600; color: var(--text); }
+  .memo-card .memo-label .memo-size { color: var(--text-dim); font-family: var(--mono); font-size: 0.6rem; }
+  .memo-card .memo-type { font-family: var(--mono); font-size: 0.65rem; margin-bottom: 0.3rem; }
+  .from-alpha .memo-type { color: var(--blue); }
+  .from-beta .memo-type { color: var(--purple); }
+  .memo-card .memo-hex {
+    font-family: var(--mono); font-size: 0.6rem;
+    color: var(--text-dim); word-break: break-all;
+    line-height: 1.4;
+  }
+  .memo-card .memo-raw {
+    display: none; font-family: var(--mono); font-size: 0.55rem;
+    color: var(--text-dim); word-break: break-all;
+    margin-top: 0.3rem; padding-top: 0.3rem;
+    border-top: 1px solid var(--border);
+  }
+  .show-raw .memo-card .memo-raw { display: block; }
+
+  .chain-note {
+    text-align: center; font-size: 0.65rem;
+    color: var(--text-dim); padding: 0.5rem;
+    font-style: italic;
+    opacity: 0; transition: opacity 0.5s;
+  }
+  .chain-note.visible { opacity: 1; }
+
+  .ratchet-display {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.4rem 0.6rem;
+    font-family: var(--mono); font-size: 0.65rem;
+    color: var(--green); text-align: center;
+    opacity: 0; transition: opacity 0.4s;
+  }
+  .ratchet-display.visible { opacity: 1; }
+
+  .privacy-summary {
+    display: none; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.75rem; padding: 1rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .privacy-summary.visible { display: grid; }
+
+  .stat-card {
+    text-align: center; padding: 0.75rem;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg);
+    opacity: 0; animation: fadeIn 0.5s ease forwards;
+  }
+  .stat-card .stat-value {
+    font-size: 1.3rem; font-weight: 700;
+    font-family: var(--mono);
+  }
+  .stat-card .stat-label {
+    font-size: 0.7rem; color: var(--text-dim);
+    margin-top: 0.2rem;
+  }
+  .stat-card.highlight .stat-value { color: var(--green); }
+
+  @keyframes fadeIn {
+    from { opacity: 0; } to { opacity: 1; }
+  }
+  @keyframes memoSlide {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes glow {
+    0%, 100% { box-shadow: 0 0 4px rgba(59,130,246,0.2); }
+    50% { box-shadow: 0 0 12px rgba(59,130,246,0.5); }
+  }
+  .memo-card.glow { animation: memoSlide 0.6s ease forwards, glow 1s ease 0.6s; }
+
+  @media (max-width: 768px) {
+    .arena {
+      grid-template-columns: 1fr;
+      grid-template-rows: auto auto auto;
+    }
+    .blockchain { border-left: none; border-right: none; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .agent-beta { order: 3; }
+    .blockchain { order: 2; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>Zcash</span> Agent Toolkit Demo</h1>
+  <p>Simulated agent-to-agent communication over shielded memos</p>
+</header>
+
+<div class="controls">
+  <button id="btn-restart" title="Restart animation">Restart</button>
+  <input type="text" id="input-message" placeholder="Send custom message..." />
+  <button id="btn-send">Send</button>
+  <label><input type="checkbox" id="toggle-raw" /> Show Raw Bytes</label>
+</div>
+
+<div class="arena" id="arena">
+  <div class="agent agent-alpha" id="agent-alpha">
+    <div class="agent-header">
+      <div class="agent-icon">A</div>
+      <div>
+        <div class="agent-name">Agent Alpha</div>
+        <div class="agent-status" id="alpha-status">Idle</div>
+      </div>
+    </div>
+    <div class="key-display" id="alpha-key">
+      <div class="label">Public Key (X25519)</div>
+      <div class="value" id="alpha-key-val"></div>
+    </div>
+    <div class="ratchet-display" id="alpha-ratchet"></div>
+    <div class="message-log" id="alpha-log"></div>
+  </div>
+
+  <div class="blockchain" id="blockchain">
+    <div class="chain-header">
+      <div class="chain-icon">&#9939;</div>
+      Zcash Blockchain
+    </div>
+    <div id="chain-memos"></div>
+    <div class="chain-note" id="chain-note">
+      All memos are exactly 512 bytes.<br>An observer sees identical-sized encrypted blobs.
+    </div>
+  </div>
+
+  <div class="agent agent-beta" id="agent-beta">
+    <div class="agent-header">
+      <div class="agent-icon">B</div>
+      <div>
+        <div class="agent-name">Agent Beta</div>
+        <div class="agent-status" id="beta-status">Idle</div>
+      </div>
+    </div>
+    <div class="key-display" id="beta-key">
+      <div class="label">Public Key (X25519)</div>
+      <div class="value" id="beta-key-val"></div>
+    </div>
+    <div class="ratchet-display" id="beta-ratchet"></div>
+    <div class="message-log" id="beta-log"></div>
+  </div>
+</div>
+
+<div class="privacy-summary" id="summary">
+  <div class="stat-card" style="animation-delay: 0s">
+    <div class="stat-value" id="stat-memos">0</div>
+    <div class="stat-label">memos transmitted</div>
+  </div>
+  <div class="stat-card" style="animation-delay: 0.1s">
+    <div class="stat-value">512</div>
+    <div class="stat-label">bytes each</div>
+  </div>
+  <div class="stat-card" style="animation-delay: 0.2s">
+    <div class="stat-value" id="stat-bytes">0</div>
+    <div class="stat-label">total bytes on chain</div>
+  </div>
+  <div class="stat-card highlight" style="animation-delay: 0.3s">
+    <div class="stat-value" id="stat-observer">nothing</div>
+    <div class="stat-label">an observer learns</div>
+  </div>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // --- Utilities ---
+  function randomHex(bytes) {
+    const arr = new Uint8Array(bytes);
+    crypto.getRandomValues(arr);
+    return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function truncHex(hex, len) {
+    if (hex.length <= len) return hex;
+    return hex.slice(0, len) + '...';
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  // --- DOM refs ---
+  const $ = id => document.getElementById(id);
+  const alphaStatus = $('alpha-status');
+  const betaStatus  = $('beta-status');
+  const alphaKey    = $('alpha-key');
+  const betaKey     = $('beta-key');
+  const alphaKeyVal = $('alpha-key-val');
+  const betaKeyVal  = $('beta-key-val');
+  const alphaRatchet = $('alpha-ratchet');
+  const betaRatchet  = $('beta-ratchet');
+  const alphaLog    = $('alpha-log');
+  const betaLog     = $('beta-log');
+  const chainMemos  = $('chain-memos');
+  const chainNote   = $('chain-note');
+  const summary     = $('summary');
+  const arena       = $('arena');
+
+  let memoCount = 0;
+  let ratchetIndex = 0;
+  let running = false;
+
+  // --- Rendering helpers ---
+  function setStatus(agent, text) {
+    (agent === 'alpha' ? alphaStatus : betaStatus).textContent = text;
+  }
+
+  function addLog(agent, type, content) {
+    const log = agent === 'alpha' ? alphaLog : betaLog;
+    const entry = document.createElement('div');
+    entry.className = 'log-entry';
+    const hex = randomHex(32);
+    entry.innerHTML = `
+      <div class="log-type">${type}</div>
+      <div class="log-content">${content}</div>
+      <div class="log-hex">${hex}</div>
+    `;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function addMemo(from, type, preview) {
+    memoCount++;
+    const card = document.createElement('div');
+    card.className = `memo-card from-${from} glow`;
+    const rawBytes = randomHex(64);
+    const headerHex = '01' + (type === 'Handshake' ? '01' : type === 'Command' ? '03' : type === 'TaskAssign' ? '10' : type === 'TaskProof' ? '11' : type === 'PaymentConfirm' ? '12' : '02') + randomHex(16) + '0001' + '0001' + randomHex(32);
+    card.innerHTML = `
+      <div class="memo-label">
+        <span class="memo-id">MEMO #${memoCount}</span>
+        <span class="memo-size">512 bytes</span>
+      </div>
+      <div class="memo-type">${type}</div>
+      <div class="memo-hex">${preview}</div>
+      <div class="memo-raw">Header: ${truncHex(headerHex, 40)}...<br>Payload: ${truncHex(rawBytes, 48)}...<br>Padding: 00 00 00 00 00 00 00 00...</div>
+    `;
+    chainMemos.appendChild(card);
+    chainMemos.scrollTop = chainMemos.scrollHeight;
+  }
+
+  function showRatchet(index) {
+    const text = `Ratchet \u2192 Key #${index}`;
+    alphaRatchet.textContent = text;
+    alphaRatchet.classList.add('visible');
+    betaRatchet.textContent = text;
+    betaRatchet.classList.add('visible');
+  }
+
+  function reset() {
+    alphaLog.innerHTML = '';
+    betaLog.innerHTML = '';
+    chainMemos.innerHTML = '';
+    alphaKey.classList.remove('visible');
+    betaKey.classList.remove('visible');
+    alphaRatchet.classList.remove('visible');
+    betaRatchet.classList.remove('visible');
+    chainNote.classList.remove('visible');
+    summary.classList.remove('visible');
+    arena.classList.remove('show-raw');
+    setStatus('alpha', 'Idle');
+    setStatus('beta', 'Idle');
+    memoCount = 0;
+    ratchetIndex = 0;
+  }
+
+  // --- Animation steps ---
+
+  async function step1_keygen() {
+    setStatus('alpha', 'Generating keypair...');
+    setStatus('beta', 'Generating keypair...');
+    await sleep(600);
+
+    const akHex = randomHex(32);
+    const bkHex = randomHex(32);
+    alphaKeyVal.textContent = truncHex(akHex, 24);
+    betaKeyVal.textContent = truncHex(bkHex, 24);
+    alphaKey.classList.add('visible');
+    betaKey.classList.add('visible');
+
+    addLog('alpha', 'keygen', 'X25519 keypair generated');
+    addLog('beta', 'keygen', 'X25519 keypair generated');
+
+    await sleep(400);
+    setStatus('alpha', 'Ready');
+    setStatus('beta', 'Ready');
+  }
+
+  async function step2_handshake() {
+    setStatus('alpha', 'Sending handshake...');
+    addLog('alpha', 'send', 'Handshake with capabilities: [task-execution]');
+    await sleep(500);
+
+    addMemo('alpha', 'Handshake', 'Alpha \u2192 Beta \u00b7 X25519 pubkey + capabilities');
+    await sleep(800);
+
+    setStatus('beta', 'Processing handshake...');
+    addLog('beta', 'recv', 'Handshake received from Alpha');
+    await sleep(500);
+
+    setStatus('beta', 'Sending handshake...');
+    addLog('beta', 'send', 'Handshake with capabilities: [task-assignment]');
+    await sleep(500);
+
+    addMemo('beta', 'Handshake', 'Beta \u2192 Alpha \u00b7 X25519 pubkey + capabilities');
+    await sleep(800);
+
+    addLog('alpha', 'recv', 'Handshake received from Beta');
+    addLog('alpha', 'crypto', 'Shared secret derived (X25519 DH)');
+    addLog('beta', 'crypto', 'Shared secret derived (X25519 DH)');
+
+    setStatus('alpha', 'Handshake complete \u00b7 Shared secret derived');
+    setStatus('beta', 'Handshake complete \u00b7 Shared secret derived');
+  }
+
+  async function step3_forward_secrecy() {
+    showRatchet(0);
+    await sleep(600);
+    ratchetIndex = 1;
+    showRatchet(1);
+    await sleep(400);
+
+    setStatus('alpha', 'Encrypting command...');
+    const cmd = 'Execute privacy audit on contract 0xABC...';
+    addLog('alpha', 'encrypt', cmd);
+    await sleep(500);
+
+    addMemo('alpha', 'Command', `Encrypted \u00b7 ${truncHex(randomHex(20), 24)}`);
+    await sleep(800);
+
+    setStatus('beta', 'Decrypting...');
+    await sleep(400);
+    addLog('beta', 'decrypt', cmd);
+    setStatus('beta', 'Command received');
+    setStatus('alpha', 'Command sent (encrypted)');
+
+    await sleep(300);
+    chainNote.classList.add('visible');
+  }
+
+  async function step4_task_workflow() {
+    ratchetIndex = 2;
+    showRatchet(2);
+    await sleep(300);
+
+    // TaskAssign
+    setStatus('alpha', 'Assigning task...');
+    addLog('alpha', 'task', 'TaskAssign: Audit contract \u00b7 Reward: 0.5 ZEC');
+    await sleep(500);
+    addMemo('alpha', 'TaskAssign', 'Audit contract \u00b7 Reward: 0.5 ZEC');
+    await sleep(800);
+    addLog('beta', 'task', 'Task received: Audit contract');
+    setStatus('beta', 'Working on task...');
+
+    await sleep(600);
+    ratchetIndex = 3;
+    showRatchet(3);
+
+    // TaskProof
+    setStatus('beta', 'Submitting proof...');
+    addLog('beta', 'task', 'TaskProof: No leaks found \u00b7 Evidence: ipfs://Qm...');
+    await sleep(500);
+    addMemo('beta', 'TaskProof', 'No leaks found \u00b7 Evidence: ipfs://Qm...');
+    await sleep(800);
+    addLog('alpha', 'task', 'Proof received \u00b7 Verified');
+
+    await sleep(600);
+    ratchetIndex = 4;
+    showRatchet(4);
+
+    // PaymentConfirm
+    setStatus('alpha', 'Confirming payment...');
+    addLog('alpha', 'payment', 'PaymentConfirm: 0.5 ZEC \u00b7 tx: ' + truncHex(randomHex(16), 16));
+    await sleep(500);
+    addMemo('alpha', 'PaymentConfirm', 'Paid 0.5 ZEC \u00b7 tx: ' + truncHex(randomHex(16), 12));
+    await sleep(800);
+    addLog('beta', 'payment', 'Payment confirmed: 0.5 ZEC received');
+    setStatus('alpha', 'Task complete \u00b7 Payment sent');
+    setStatus('beta', 'Task complete \u00b7 Payment received');
+  }
+
+  async function step5_summary() {
+    summary.classList.add('visible');
+    $('stat-memos').textContent = memoCount;
+    $('stat-bytes').textContent = (memoCount * 512).toLocaleString();
+  }
+
+  async function runDemo() {
+    if (running) return;
+    running = true;
+    reset();
+
+    await sleep(500);
+    await step1_keygen();
+    await sleep(1000);
+    await step2_handshake();
+    await sleep(2000);
+    await step3_forward_secrecy();
+    await sleep(2000);
+    await step4_task_workflow();
+    await sleep(1000);
+    await step5_summary();
+
+    running = false;
+  }
+
+  // --- Custom message ---
+  function sendCustomMessage() {
+    const input = $('input-message');
+    const msg = input.value.trim();
+    if (!msg || running) return;
+    input.value = '';
+
+    ratchetIndex++;
+    showRatchet(ratchetIndex);
+
+    addLog('alpha', 'encrypt', msg);
+    addMemo('alpha', 'Command', `Encrypted \u00b7 ${truncHex(randomHex(20), 24)}`);
+
+    setTimeout(() => {
+      addLog('beta', 'decrypt', msg);
+      setStatus('alpha', 'Message sent');
+      setStatus('beta', 'Message received');
+      $('stat-memos').textContent = memoCount;
+      $('stat-bytes').textContent = (memoCount * 512).toLocaleString();
+    }, 800);
+  }
+
+  // --- Event listeners ---
+  $('btn-restart').addEventListener('click', runDemo);
+  $('btn-send').addEventListener('click', sendCustomMessage);
+  $('input-message').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendCustomMessage();
+  });
+  $('toggle-raw').addEventListener('change', function() {
+    arena.classList.toggle('show-raw', this.checked);
+  });
+
+  // Auto-start
+  runDemo();
+})();
+</script>
+</body>
+</html>
