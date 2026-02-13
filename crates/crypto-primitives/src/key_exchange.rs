@@ -33,6 +33,9 @@ impl AgentKeyPair {
     }
 
     /// Return the secret key as a 32-byte array.
+    ///
+    /// Only available in tests to prevent accidental secret key exposure.
+    #[cfg(test)]
     pub fn secret_key_bytes(&self) -> [u8; 32] {
         self.secret.to_bytes()
     }

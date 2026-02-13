@@ -28,18 +28,22 @@ pub fn js_blake3_keyed_hash(key: &[u8], data: &[u8]) -> Result<Vec<u8>, JsError>
 }
 
 #[wasm_bindgen(js_name = "randomBytes")]
-pub fn js_random_bytes(len: usize) -> Vec<u8> {
+pub fn js_random_bytes(len: usize) -> Result<Vec<u8>, JsError> {
     crypto_primitives::random_bytes(len)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "randomHex")]
-pub fn js_random_hex(byte_len: usize) -> String {
+pub fn js_random_hex(byte_len: usize) -> Result<String, JsError> {
     crypto_primitives::random_hex(byte_len)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "generateSessionId")]
-pub fn js_generate_session_id() -> Vec<u8> {
-    crypto_primitives::generate_session_id().to_vec()
+pub fn js_generate_session_id() -> Result<Vec<u8>, JsError> {
+    crypto_primitives::generate_session_id()
+        .map(|id| id.to_vec())
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 // === Address utilities ===
@@ -112,11 +116,6 @@ impl WasmAgentKeyPair {
         self.inner.public_key_hex()
     }
 
-    #[wasm_bindgen(js_name = "secretKeyBytes")]
-    pub fn secret_key_bytes(&self) -> Vec<u8> {
-        self.inner.secret_key_bytes().to_vec()
-    }
-
     #[wasm_bindgen(js_name = "diffieHellman")]
     pub fn diffie_hellman(&self, peer_public: &[u8]) -> Result<Vec<u8>, JsError> {
         if peer_public.len() != 32 {
@@ -161,8 +160,10 @@ impl WasmAgentCipher {
         })
     }
 
-    pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        self.inner.encrypt(plaintext)
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .encrypt(plaintext)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, JsError> {
@@ -172,8 +173,10 @@ impl WasmAgentCipher {
     }
 
     #[wasm_bindgen(js_name = "encryptHex")]
-    pub fn encrypt_hex(&self, plaintext: &[u8]) -> String {
-        self.inner.encrypt_hex(plaintext)
+    pub fn encrypt_hex(&self, plaintext: &[u8]) -> Result<String, JsError> {
+        self.inner
+            .encrypt_hex(plaintext)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = "decryptHex")]
@@ -195,7 +198,8 @@ pub fn js_encode_memos(
     let mt = memo_codec::MessageType::try_from(msg_type)
         .map_err(|_| JsError::new(&format!("invalid message type: 0x{:02X}", msg_type)))?;
     let sid = to_session_id(session_id)?;
-    let memos = memo_codec::chunk_message(data, mt, &sid);
+    let memos = memo_codec::chunk_message(data, mt, &sid)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 
@@ -248,7 +252,8 @@ pub fn js_encode_handshake(
         serde_wasm_bindgen::from_value(handshake_json)
             .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
-    let memos = agent_protocol::encode_handshake(&handshake, &sid);
+    let memos = agent_protocol::encode_handshake(&handshake, &sid)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 
@@ -283,7 +288,8 @@ pub fn js_encode_task_assignment(
     let task: agent_protocol::TaskAssignment = serde_wasm_bindgen::from_value(task_json)
         .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
-    let memos = agent_protocol::encode_task_assignment(&task, &sid);
+    let memos = agent_protocol::encode_task_assignment(&task, &sid)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 
@@ -295,7 +301,8 @@ pub fn js_encode_task_proof(
     let proof: agent_protocol::TaskProof = serde_wasm_bindgen::from_value(proof_json)
         .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
-    let memos = agent_protocol::encode_task_proof(&proof, &sid);
+    let memos = agent_protocol::encode_task_proof(&proof, &sid)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 
@@ -308,7 +315,8 @@ pub fn js_encode_payment_confirmation(
         serde_wasm_bindgen::from_value(payment_json)
             .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
-    let memos = agent_protocol::encode_payment_confirmation(&payment, &sid);
+    let memos = agent_protocol::encode_payment_confirmation(&payment, &sid)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 

@@ -4,10 +4,16 @@ use serde::{Deserialize, Serialize};
 pub const MEMO_SIZE: usize = 512;
 
 /// Size of the structured header in bytes.
-pub const HEADER_SIZE: usize = 54;
+pub const HEADER_SIZE: usize = 60;
 
 /// Maximum payload per memo chunk: MEMO_SIZE - HEADER_SIZE.
-pub const PAYLOAD_SIZE: usize = MEMO_SIZE - HEADER_SIZE; // 458
+pub const PAYLOAD_SIZE: usize = MEMO_SIZE - HEADER_SIZE; // 452
+
+/// Offset of the payload_length field within the header.
+pub const PAYLOAD_LENGTH_OFFSET: usize = 54;
+
+/// Offset of the reserved bytes within the header.
+pub const RESERVED_OFFSET: usize = 56;
 
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u8 = 0x01;
@@ -90,6 +96,6 @@ mod tests {
     #[test]
     fn constants_are_consistent() {
         assert_eq!(PAYLOAD_SIZE, MEMO_SIZE - HEADER_SIZE);
-        assert_eq!(PAYLOAD_SIZE, 458);
+        assert_eq!(PAYLOAD_SIZE, 452);
     }
 }

@@ -119,9 +119,9 @@ describe('MemoCodec', () => {
   });
 
   describe('chunking', () => {
-    it('chunks messages larger than 458 bytes', async () => {
+    it('chunks messages larger than 452 bytes', async () => {
       const codec = await MemoCodec.create();
-      // 500 bytes of text will exceed the 458-byte payload limit
+      // 500 bytes of text will exceed the 452-byte payload limit
       const text = 'A'.repeat(500);
       const memos = codec.encodeText(text);
       expect(memos.length).toBeGreaterThan(1);
@@ -145,17 +145,17 @@ describe('MemoCodec', () => {
       expect(decoded.contentHash.length).toBe(64); // BLAKE3 = 32 bytes = 64 hex
     });
 
-    it('exactly 458 bytes fits in 1 chunk', async () => {
+    it('exactly 452 bytes fits in 1 chunk', async () => {
       const codec = await MemoCodec.create();
-      // 458 ASCII chars = 458 bytes
-      const text = 'B'.repeat(458);
+      // 452 ASCII chars = 452 bytes
+      const text = 'B'.repeat(452);
       const memos = codec.encodeText(text);
       expect(memos.length).toBe(1);
     });
 
-    it('459 bytes requires 2 chunks', async () => {
+    it('453 bytes requires 2 chunks', async () => {
       const codec = await MemoCodec.create();
-      const text = 'C'.repeat(459);
+      const text = 'C'.repeat(453);
       const memos = codec.encodeText(text);
       expect(memos.length).toBe(2);
     });

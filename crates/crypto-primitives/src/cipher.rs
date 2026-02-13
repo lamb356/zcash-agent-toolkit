@@ -15,6 +15,12 @@ pub enum CipherError {
     InvalidCiphertext,
     /// Hex string could not be decoded.
     InvalidKeyHex,
+    /// Key initialization failed.
+    KeyInit,
+    /// Random number generation failed.
+    RngFailure,
+    /// Encryption operation failed.
+    EncryptionFailed,
 }
 
 impl std::fmt::Display for CipherError {
@@ -23,6 +29,9 @@ impl std::fmt::Display for CipherError {
             CipherError::DecryptionFailed => write!(f, "decryption failed"),
             CipherError::InvalidCiphertext => write!(f, "invalid ciphertext"),
             CipherError::InvalidKeyHex => write!(f, "invalid key hex"),
+            CipherError::KeyInit => write!(f, "key initialization failed"),
+            CipherError::RngFailure => write!(f, "random number generation failed"),
+            CipherError::EncryptionFailed => write!(f, "encryption failed"),
         }
     }
 }
@@ -42,16 +51,19 @@ impl AgentCipher {
     }
 
     /// Encrypt plaintext. Returns nonce (12 bytes) || ciphertext || tag (16 bytes).
-    pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        let cipher = ChaCha20Poly1305::new_from_slice(&self.key).unwrap();
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CipherError> {
+        let cipher = ChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| CipherError::KeyInit)?;
         let mut nonce_bytes = [0u8; 12];
-        getrandom::getrandom(&mut nonce_bytes).expect("failed to generate random nonce");
+        getrandom::getrandom(&mut nonce_bytes)
+            .map_err(|_| CipherError::RngFailure)?;
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher.encrypt(nonce, plaintext).expect("encryption failed");
+        let ciphertext = cipher.encrypt(nonce, plaintext)
+            .map_err(|_| CipherError::EncryptionFailed)?;
         let mut result = Vec::with_capacity(12 + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
-        result
+        Ok(result)
     }
 
     /// Decrypt data formatted as nonce (12 bytes) || ciphertext || tag (16 bytes).
@@ -61,7 +73,8 @@ impl AgentCipher {
             return Err(CipherError::InvalidCiphertext);
         }
         let (nonce_bytes, ciphertext) = data.split_at(12);
-        let cipher = ChaCha20Poly1305::new_from_slice(&self.key).unwrap();
+        let cipher = ChaCha20Poly1305::new_from_slice(&self.key)
+            .map_err(|_| CipherError::KeyInit)?;
         let nonce = Nonce::from_slice(nonce_bytes);
         cipher
             .decrypt(nonce, ciphertext)
@@ -69,8 +82,8 @@ impl AgentCipher {
     }
 
     /// Encrypt plaintext and return the result as a hex string.
-    pub fn encrypt_hex(&self, plaintext: &[u8]) -> String {
-        hex::encode(self.encrypt(plaintext))
+    pub fn encrypt_hex(&self, plaintext: &[u8]) -> Result<String, CipherError> {
+        Ok(hex::encode(self.encrypt(plaintext)?))
     }
 
     /// Decrypt from a hex-encoded string.
@@ -92,7 +105,7 @@ mod tests {
     fn encrypt_decrypt_roundtrip() {
         let cipher = test_cipher();
         let plaintext = b"hello, zcash agent!";
-        let ciphertext = cipher.encrypt(plaintext);
+        let ciphertext = cipher.encrypt(plaintext).unwrap();
         let decrypted = cipher.decrypt(&ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
     }
@@ -101,7 +114,7 @@ mod tests {
     fn wrong_key_fails() {
         let cipher_a = AgentCipher::from_key([1u8; 32]);
         let cipher_b = AgentCipher::from_key([2u8; 32]);
-        let ciphertext = cipher_a.encrypt(b"secret");
+        let ciphertext = cipher_a.encrypt(b"secret").unwrap();
         let result = cipher_b.decrypt(&ciphertext);
         assert!(result.is_err());
     }
@@ -109,7 +122,7 @@ mod tests {
     #[test]
     fn tampered_ciphertext_fails() {
         let cipher = test_cipher();
-        let mut ciphertext = cipher.encrypt(b"important data");
+        let mut ciphertext = cipher.encrypt(b"important data").unwrap();
         // Flip a byte in the ciphertext portion (after the 12-byte nonce)
         let idx = 12 + (ciphertext.len() - 12) / 2;
         ciphertext[idx] ^= 0xFF;
@@ -121,15 +134,15 @@ mod tests {
     fn two_encryptions_produce_different_ciphertext() {
         let cipher = test_cipher();
         let plaintext = b"same message";
-        let ct_a = cipher.encrypt(plaintext);
-        let ct_b = cipher.encrypt(plaintext);
+        let ct_a = cipher.encrypt(plaintext).unwrap();
+        let ct_b = cipher.encrypt(plaintext).unwrap();
         assert_ne!(ct_a, ct_b);
     }
 
     #[test]
     fn empty_plaintext_roundtrip() {
         let cipher = test_cipher();
-        let ciphertext = cipher.encrypt(b"");
+        let ciphertext = cipher.encrypt(b"").unwrap();
         let decrypted = cipher.decrypt(&ciphertext).unwrap();
         assert_eq!(decrypted, b"");
     }
@@ -138,7 +151,7 @@ mod tests {
     fn large_plaintext_roundtrip() {
         let cipher = test_cipher();
         let plaintext = vec![0xABu8; 10 * 1024]; // 10 KB
-        let ciphertext = cipher.encrypt(&plaintext);
+        let ciphertext = cipher.encrypt(&plaintext).unwrap();
         let decrypted = cipher.decrypt(&ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
     }
@@ -147,7 +160,7 @@ mod tests {
     fn encrypt_hex_decrypt_hex_roundtrip() {
         let cipher = test_cipher();
         let plaintext = b"hex roundtrip test";
-        let hex_ct = cipher.encrypt_hex(plaintext);
+        let hex_ct = cipher.encrypt_hex(plaintext).unwrap();
         let decrypted = cipher.decrypt_hex(&hex_ct).unwrap();
         assert_eq!(decrypted, plaintext);
     }

@@ -35,6 +35,8 @@ export interface TaskAssignment {
   reward_zec: number;
   deadline?: string;
   verification_method: string;
+  nonce: string;
+  created_at?: number;
 }
 
 /** Proof that a task has been completed. */
@@ -44,6 +46,7 @@ export interface TaskProof {
   timestamp: number;
   proof_hash: string;
   metadata?: string;
+  nonce: string;
 }
 
 /** Confirmation that payment has been sent. */
@@ -52,6 +55,7 @@ export interface PaymentConfirmation {
   amount_zec: number;
   tx_id: string;
   timestamp: number;
+  nonce: string;
 }
 
 /** Decoded task message with discriminated type. */

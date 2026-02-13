@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::chunk::{decode_memo, encode_memo, MemoError, MemoHeader};
 use crate::types::{MessageType, MEMO_SIZE, PAYLOAD_SIZE, PROTOCOL_VERSION};
+#[cfg(test)]
+use crate::types::HEADER_SIZE;
 
 /// A fully reassembled multi-chunk message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,26 +20,16 @@ pub struct ReassembledMessage {
 
 /// Split `data` into a sequence of 512-byte memos.
 ///
-/// Computes a BLAKE3 hash over the full `data`, then produces one memo per
-/// `PAYLOAD_SIZE`-byte chunk.
+/// Computes a BLAKE3 hash over the full original `data`, then produces one memo per
+/// `PAYLOAD_SIZE`-byte chunk. Each chunk records its exact payload length in the header.
+///
+/// Returns an error if the message is too large (would require more than u16::MAX chunks).
 pub fn chunk_message(
     data: &[u8],
     msg_type: MessageType,
     session_id: &[u8; 16],
-) -> Vec<[u8; MEMO_SIZE]> {
-    // For binary types, decode_memo preserves the full zero-padded payload per
-    // chunk, so the reassembled data will be padded to a multiple of
-    // PAYLOAD_SIZE.  Compute the content hash over the same padded
-    // representation so the hash check in decode_chunked_message succeeds.
-    let content_hash: [u8; 32] = if msg_type.is_binary() && !data.is_empty() {
-        let num_chunks = (data.len() + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
-        let padded_len = num_chunks * PAYLOAD_SIZE;
-        let mut padded = data.to_vec();
-        padded.resize(padded_len, 0);
-        *blake3::hash(&padded).as_bytes()
-    } else {
-        *blake3::hash(data).as_bytes()
-    };
+) -> Result<Vec<[u8; MEMO_SIZE]>, MemoError> {
+    let content_hash: [u8; 32] = *blake3::hash(data).as_bytes();
 
     let chunks: Vec<&[u8]> = if data.is_empty() {
         // Even an empty message produces one chunk.
@@ -46,9 +38,16 @@ pub fn chunk_message(
         data.chunks(PAYLOAD_SIZE).collect()
     };
 
+    if chunks.len() > u16::MAX as usize {
+        return Err(MemoError::MessageTooLarge {
+            max_bytes: u16::MAX as usize * PAYLOAD_SIZE,
+            actual_bytes: data.len(),
+        });
+    }
+
     let total_chunks = chunks.len() as u16;
 
-    chunks
+    let memos = chunks
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
@@ -59,10 +58,13 @@ pub fn chunk_message(
                 chunk_index: i as u16,
                 total_chunks,
                 content_hash,
+                payload_length: chunk.len() as u16,
             };
             encode_memo(&header, chunk).expect("chunk size <= PAYLOAD_SIZE by construction")
         })
-        .collect()
+        .collect();
+
+    Ok(memos)
 }
 
 /// Convenience function: decode a complete set of memos into a single message.
@@ -80,7 +82,7 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
     // Decode all headers and payloads.
     let decoded: Vec<(MemoHeader, Vec<u8>)> = memos
         .iter()
-        .map(|m| decode_memo(m))
+        .map(decode_memo)
         .collect::<Result<Vec<_>, _>>()?;
 
     let first = &decoded[0].0;
@@ -89,10 +91,23 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
     let content_hash = first.content_hash;
     let total_chunks = first.total_chunks;
 
-    // Validate all headers share the same session.
+    // Validate all headers are consistent.
+    let mut seen_indices = std::collections::HashSet::new();
     for (hdr, _) in &decoded {
         if hdr.session_id != session_id {
             return Err(MemoError::SessionIdMismatch);
+        }
+        if hdr.msg_type != msg_type || hdr.content_hash != content_hash || hdr.total_chunks != total_chunks {
+            return Err(MemoError::InconsistentChunks);
+        }
+        if hdr.chunk_index >= total_chunks {
+            return Err(MemoError::InvalidChunkIndex {
+                index: hdr.chunk_index,
+                total: total_chunks,
+            });
+        }
+        if !seen_indices.insert(hdr.chunk_index) {
+            return Err(MemoError::DuplicateChunkIndex(hdr.chunk_index));
         }
     }
 
@@ -103,7 +118,7 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
         });
     }
 
-    // Sort by chunk_index and reassemble.
+    // Sort by chunk_index and reassemble using exact payload_length from each chunk.
     let mut sorted = decoded;
     sorted.sort_by_key(|(hdr, _)| hdr.chunk_index);
 
@@ -111,14 +126,6 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
     for (_hdr, payload) in &sorted {
         data.extend_from_slice(payload);
     }
-
-    // For non-binary types the last chunk's payload was zero-stripped during
-    // decode_memo, so `data` should match the original. For binary types the
-    // full padded payloads are preserved (zero-padded to a multiple of
-    // PAYLOAD_SIZE). The content hash was computed over the same padded
-    // representation in chunk_message, so the hash check succeeds.
-    // Note: binary consumers must be aware that data is padded to a multiple
-    // of PAYLOAD_SIZE (458 bytes).
 
     // Verify BLAKE3 hash.
     let computed: [u8; 32] = *blake3::hash(&data).as_bytes();
@@ -138,15 +145,40 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
 ///
 /// Chunks are keyed by `(session_id, chunk_index)`. When all chunks for a
 /// session have been received the message is reassembled and returned.
-#[derive(Debug, Default)]
+///
+/// Enforces a maximum number of concurrent sessions to prevent memory exhaustion.
+#[derive(Debug)]
 pub struct ReassemblyBuffer {
     /// Map from session_id to a map from chunk_index to (header, payload).
     sessions: HashMap<[u8; 16], HashMap<u16, (MemoHeader, Vec<u8>)>>,
+    /// Maximum number of concurrent sessions.
+    max_sessions: usize,
+    /// Track creation order for eviction (session_id, insertion order).
+    insertion_order: Vec<[u8; 16]>,
+}
+
+impl Default for ReassemblyBuffer {
+    fn default() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            max_sessions: 256,
+            insertion_order: Vec::new(),
+        }
+    }
 }
 
 impl ReassemblyBuffer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a buffer with a custom maximum session limit.
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            max_sessions,
+            insertion_order: Vec::new(),
+        }
     }
 
     /// Add a single 512-byte memo chunk.
@@ -162,13 +194,37 @@ impl ReassemblyBuffer {
 
         let session_id = header.session_id;
         let total_chunks = header.total_chunks;
+        let chunk_index = header.chunk_index;
+
+        if chunk_index >= total_chunks {
+            return Err(MemoError::InvalidChunkIndex {
+                index: chunk_index,
+                total: total_chunks,
+            });
+        }
+
+        let is_new_session = !self.sessions.contains_key(&session_id);
+        if is_new_session && self.sessions.len() >= self.max_sessions {
+            // Evict the oldest session.
+            if let Some(oldest) = self.insertion_order.first().copied() {
+                self.sessions.remove(&oldest);
+                self.insertion_order.remove(0);
+            }
+        }
 
         let session = self.sessions.entry(session_id).or_default();
-        session.insert(header.chunk_index, (header, payload));
+        if session.contains_key(&chunk_index) {
+            return Err(MemoError::DuplicateChunkIndex(chunk_index));
+        }
+        session.insert(chunk_index, (header, payload));
+        if is_new_session {
+            self.insertion_order.push(session_id);
+        }
 
         if session.len() == total_chunks as usize {
             // All chunks received -- take ownership and reassemble.
             let chunks = self.sessions.remove(&session_id).unwrap();
+            self.insertion_order.retain(|id| *id != session_id);
             let msg_type = chunks.values().next().unwrap().0.msg_type;
             let content_hash = chunks.values().next().unwrap().0.content_hash;
 
@@ -213,22 +269,22 @@ mod tests {
     #[test]
     fn single_chunk_for_small_data() {
         let data = b"hello world";
-        let memos = chunk_message(data, MessageType::Text, &test_session_id());
+        let memos = chunk_message(data, MessageType::Text, &test_session_id()).unwrap();
         assert_eq!(memos.len(), 1);
     }
 
     #[test]
-    fn two_chunks_for_459_bytes() {
-        let data = vec![0x42u8; 459];
-        let memos = chunk_message(&data, MessageType::Text, &test_session_id());
+    fn two_chunks_for_453_bytes() {
+        let data = vec![0x42u8; 453];
+        let memos = chunk_message(&data, MessageType::Text, &test_session_id()).unwrap();
         assert_eq!(memos.len(), 2);
     }
 
     #[test]
     fn correct_chunk_count_for_1000_bytes() {
         let data = vec![0x42u8; 1000];
-        let memos = chunk_message(&data, MessageType::Text, &test_session_id());
-        // ceil(1000 / 458) = 3
+        let memos = chunk_message(&data, MessageType::Text, &test_session_id()).unwrap();
+        // ceil(1000 / 452) = 3
         assert_eq!(memos.len(), 3);
     }
 
@@ -236,7 +292,7 @@ mod tests {
     fn roundtrip_5kb() {
         let data: Vec<u8> = (0..5000).map(|i| (i % 256) as u8).collect();
         let sid = test_session_id();
-        let memos = chunk_message(&data, MessageType::Text, &sid);
+        let memos = chunk_message(&data, MessageType::Text, &sid).unwrap();
         let msg = decode_chunked_message(&memos).expect("decode");
         assert_eq!(msg.data, data);
         assert_eq!(msg.session_id, sid);
@@ -247,7 +303,7 @@ mod tests {
     fn roundtrip_10kb() {
         let data: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
         let sid = test_session_id();
-        let memos = chunk_message(&data, MessageType::Command, &sid);
+        let memos = chunk_message(&data, MessageType::Command, &sid).unwrap();
         let msg = decode_chunked_message(&memos).expect("decode");
         assert_eq!(msg.data, data);
     }
@@ -256,10 +312,10 @@ mod tests {
     fn tampered_payload_fails_hash_check() {
         let data = b"important message content that should be verified";
         let sid = test_session_id();
-        let mut memos = chunk_message(data, MessageType::Text, &sid);
+        let mut memos = chunk_message(data, MessageType::Text, &sid).unwrap();
 
-        // Tamper with the payload area of the first (only) memo.
-        memos[0][MEMO_SIZE - 1] = 0xFF;
+        // Tamper with a byte inside the actual payload region (after the 60-byte header).
+        memos[0][HEADER_SIZE] ^= 0xFF;
 
         let err = decode_chunked_message(&memos).unwrap_err();
         assert_eq!(err, MemoError::ContentHashMismatch);
@@ -271,8 +327,8 @@ mod tests {
         let sid1 = [0x01; 16];
         let sid2 = [0x02; 16];
 
-        let memos1 = chunk_message(&data, MessageType::Text, &sid1);
-        let memos2 = chunk_message(&data, MessageType::Text, &sid2);
+        let memos1 = chunk_message(&data, MessageType::Text, &sid1).unwrap();
+        let memos2 = chunk_message(&data, MessageType::Text, &sid2).unwrap();
 
         // Mix chunk 0 from session 1 with chunk 1 from session 2.
         let mixed = vec![memos1[0], memos2[1]];
@@ -284,7 +340,7 @@ mod tests {
     fn reassembly_buffer_returns_none_until_complete() {
         let data = vec![0x42u8; 1000]; // 3 chunks
         let sid = test_session_id();
-        let memos = chunk_message(&data, MessageType::Text, &sid);
+        let memos = chunk_message(&data, MessageType::Text, &sid).unwrap();
         assert_eq!(memos.len(), 3);
 
         let mut buf = ReassemblyBuffer::new();
@@ -307,7 +363,7 @@ mod tests {
     fn reassembly_buffer_out_of_order() {
         let data = vec![0x42u8; 1000]; // 3 chunks
         let sid = test_session_id();
-        let memos = chunk_message(&data, MessageType::Text, &sid);
+        let memos = chunk_message(&data, MessageType::Text, &sid).unwrap();
 
         let mut buf = ReassemblyBuffer::new();
 
@@ -326,7 +382,7 @@ mod tests {
         let text = "Hello, world! Bonjour le monde! \u{1F600} \u{4e16}\u{754c}\u{4f60}\u{597d}";
         let data = text.as_bytes();
         let sid = test_session_id();
-        let memos = chunk_message(data, MessageType::Text, &sid);
+        let memos = chunk_message(data, MessageType::Text, &sid).unwrap();
         let msg = decode_chunked_message(&memos).expect("decode");
         let recovered = std::str::from_utf8(&msg.data).expect("valid utf-8");
         assert_eq!(recovered, text);
@@ -342,7 +398,7 @@ mod tests {
         });
         let data = serde_json::to_vec(&value).expect("serialize");
         let sid = test_session_id();
-        let memos = chunk_message(&data, MessageType::Command, &sid);
+        let memos = chunk_message(&data, MessageType::Command, &sid).unwrap();
         let msg = decode_chunked_message(&memos).expect("decode");
         let recovered: serde_json::Value = serde_json::from_slice(&msg.data).expect("deserialize");
         assert_eq!(recovered, value);
@@ -359,7 +415,7 @@ mod tests {
     fn empty_data_produces_one_chunk() {
         let data = b"";
         let sid = test_session_id();
-        let memos = chunk_message(data, MessageType::Ack, &sid);
+        let memos = chunk_message(data, MessageType::Ack, &sid).unwrap();
         assert_eq!(memos.len(), 1);
 
         let msg = decode_chunked_message(&memos).expect("decode");

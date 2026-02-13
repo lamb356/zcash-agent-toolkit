@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crypto_primitives::blake3_hash_hex;
@@ -18,6 +20,12 @@ pub struct TaskAssignment {
     pub deadline: Option<String>,
     /// Method used to verify task completion.
     pub verification_method: String,
+    /// Anti-replay nonce.
+    #[serde(default)]
+    pub nonce: String,
+    /// Unix timestamp of when this assignment was created.
+    #[serde(default)]
+    pub created_at: Option<u64>,
 }
 
 /// Proof that a task has been completed.
@@ -33,6 +41,9 @@ pub struct TaskProof {
     pub proof_hash: String,
     /// Optional metadata as a JSON string.
     pub metadata: Option<String>,
+    /// Anti-replay nonce.
+    #[serde(default)]
+    pub nonce: String,
 }
 
 /// Confirmation that payment has been sent for a completed task.
@@ -46,9 +57,12 @@ pub struct PaymentConfirmation {
     pub tx_id: String,
     /// Unix timestamp of the payment.
     pub timestamp: u64,
+    /// Anti-replay nonce.
+    #[serde(default)]
+    pub nonce: String,
 }
 
-/// Create a task proof, auto-generating the BLAKE3 proof_hash from the provided proof data.
+/// Create a task proof, auto-generating the BLAKE3 proof_hash and nonce.
 pub fn create_task_proof(
     task_id: &str,
     action: &str,
@@ -61,6 +75,7 @@ pub fn create_task_proof(
         timestamp,
         proof_hash: blake3_hash_hex(proof_data),
         metadata: None,
+        nonce: crypto_primitives::random_hex(16).unwrap_or_default(),
     }
 }
 
@@ -68,24 +83,47 @@ pub fn create_task_proof(
 pub fn encode_task_assignment(
     task: &TaskAssignment,
     session_id: &[u8; 16],
-) -> Vec<[u8; MEMO_SIZE]> {
-    let json = serde_json::to_vec(task).expect("task serializes");
-    chunk_message(&json, MessageType::TaskAssign, session_id)
+) -> Result<Vec<[u8; MEMO_SIZE]>, ProtocolError> {
+    let json = serde_json::to_vec(task).map_err(ProtocolError::Json)?;
+    chunk_message(&json, MessageType::TaskAssign, session_id).map_err(ProtocolError::Memo)
 }
 
 /// Encode a TaskProof as TaskProof-type memos.
-pub fn encode_task_proof(proof: &TaskProof, session_id: &[u8; 16]) -> Vec<[u8; MEMO_SIZE]> {
-    let json = serde_json::to_vec(proof).expect("proof serializes");
-    chunk_message(&json, MessageType::TaskProof, session_id)
+pub fn encode_task_proof(proof: &TaskProof, session_id: &[u8; 16]) -> Result<Vec<[u8; MEMO_SIZE]>, ProtocolError> {
+    let json = serde_json::to_vec(proof).map_err(ProtocolError::Json)?;
+    chunk_message(&json, MessageType::TaskProof, session_id).map_err(ProtocolError::Memo)
 }
 
 /// Encode a PaymentConfirmation as PaymentConfirm-type memos.
 pub fn encode_payment_confirmation(
     payment: &PaymentConfirmation,
     session_id: &[u8; 16],
-) -> Vec<[u8; MEMO_SIZE]> {
-    let json = serde_json::to_vec(payment).expect("payment serializes");
-    chunk_message(&json, MessageType::PaymentConfirm, session_id)
+) -> Result<Vec<[u8; MEMO_SIZE]>, ProtocolError> {
+    let json = serde_json::to_vec(payment).map_err(ProtocolError::Json)?;
+    chunk_message(&json, MessageType::PaymentConfirm, session_id).map_err(ProtocolError::Memo)
+}
+
+/// Tracks processed message nonces to detect replay attacks.
+#[derive(Debug, Default)]
+pub struct ProcessedMessages {
+    seen_nonces: HashSet<String>,
+}
+
+impl ProcessedMessages {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a nonce has been seen before. Returns an error on replay.
+    pub fn check_replay(&mut self, nonce: &str) -> Result<(), ProtocolError> {
+        if nonce.is_empty() {
+            return Ok(()); // Empty nonces are not checked (backwards compat)
+        }
+        if !self.seen_nonces.insert(nonce.to_string()) {
+            return Err(ProtocolError::ReplayDetected);
+        }
+        Ok(())
+    }
 }
 
 /// A decoded task-related message, discriminated by variant.
@@ -136,6 +174,8 @@ mod tests {
             reward_zec: 0.01,
             deadline: Some("2026-12-31T23:59:59Z".to_string()),
             verification_method: "api_response_hash".to_string(),
+            nonce: "test-nonce-001".to_string(),
+            created_at: Some(1700000000),
         }
     }
 
@@ -146,6 +186,7 @@ mod tests {
             timestamp: 1700000000,
             proof_hash: blake3_hash_hex(b"price=42.50"),
             metadata: Some(r#"{"source":"coingecko"}"#.to_string()),
+            nonce: "test-nonce-002".to_string(),
         }
     }
 
@@ -156,15 +197,16 @@ mod tests {
             tx_id: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
                 .to_string(),
             timestamp: 1700000100,
+            nonce: "test-nonce-003".to_string(),
         }
     }
 
     #[test]
     fn task_assignment_encode_decode_roundtrip() {
         let task = sample_task();
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
-        let memos = encode_task_assignment(&task, &session_id);
+        let memos = encode_task_assignment(&task, &session_id).unwrap();
         let decoded = decode_task_message(&memos).expect("decode");
 
         match decoded {
@@ -176,9 +218,9 @@ mod tests {
     #[test]
     fn task_proof_encode_decode_roundtrip() {
         let proof = sample_proof();
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
-        let memos = encode_task_proof(&proof, &session_id);
+        let memos = encode_task_proof(&proof, &session_id).unwrap();
         let decoded = decode_task_message(&memos).expect("decode");
 
         match decoded {
@@ -190,9 +232,9 @@ mod tests {
     #[test]
     fn payment_confirmation_encode_decode_roundtrip() {
         let payment = sample_payment();
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
-        let memos = encode_payment_confirmation(&payment, &session_id);
+        let memos = encode_payment_confirmation(&payment, &session_id).unwrap();
         let decoded = decode_task_message(&memos).expect("decode");
 
         match decoded {
@@ -217,11 +259,11 @@ mod tests {
 
     #[test]
     fn full_lifecycle_assign_proof_confirm() {
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
         // Step 1: Assign
         let task = sample_task();
-        let assign_memos = encode_task_assignment(&task, &session_id);
+        let assign_memos = encode_task_assignment(&task, &session_id).unwrap();
         let decoded_assign = decode_task_message(&assign_memos).expect("decode assign");
         match decoded_assign {
             TaskMessage::Assignment(t) => assert_eq!(t, task),
@@ -230,7 +272,7 @@ mod tests {
 
         // Step 2: Prove
         let proof = sample_proof();
-        let proof_memos = encode_task_proof(&proof, &session_id);
+        let proof_memos = encode_task_proof(&proof, &session_id).unwrap();
         let decoded_proof = decode_task_message(&proof_memos).expect("decode proof");
         match decoded_proof {
             TaskMessage::Proof(p) => assert_eq!(p, proof),
@@ -239,7 +281,7 @@ mod tests {
 
         // Step 3: Confirm payment
         let payment = sample_payment();
-        let pay_memos = encode_payment_confirmation(&payment, &session_id);
+        let pay_memos = encode_payment_confirmation(&payment, &session_id).unwrap();
         let decoded_pay = decode_task_message(&pay_memos).expect("decode payment");
         match decoded_pay {
             TaskMessage::Payment(p) => assert_eq!(p, payment),
@@ -249,24 +291,24 @@ mod tests {
 
     #[test]
     fn decode_task_message_identifies_correct_variant() {
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
         let task = sample_task();
-        let memos = encode_task_assignment(&task, &session_id);
+        let memos = encode_task_assignment(&task, &session_id).unwrap();
         assert!(matches!(
             decode_task_message(&memos).unwrap(),
             TaskMessage::Assignment(_)
         ));
 
         let proof = sample_proof();
-        let memos = encode_task_proof(&proof, &session_id);
+        let memos = encode_task_proof(&proof, &session_id).unwrap();
         assert!(matches!(
             decode_task_message(&memos).unwrap(),
             TaskMessage::Proof(_)
         ));
 
         let payment = sample_payment();
-        let memos = encode_payment_confirmation(&payment, &session_id);
+        let memos = encode_payment_confirmation(&payment, &session_id).unwrap();
         assert!(matches!(
             decode_task_message(&memos).unwrap(),
             TaskMessage::Payment(_)

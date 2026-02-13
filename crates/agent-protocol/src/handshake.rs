@@ -30,9 +30,9 @@ pub fn create_handshake(keypair: &AgentKeyPair, capabilities: &[&str]) -> AgentH
 }
 
 /// Encode a handshake as Handshake-type memos for a given session.
-pub fn encode_handshake(handshake: &AgentHandshake, session_id: &[u8; 16]) -> Vec<[u8; MEMO_SIZE]> {
-    let json = serde_json::to_vec(handshake).expect("handshake serializes");
-    chunk_message(&json, MessageType::Handshake, session_id)
+pub fn encode_handshake(handshake: &AgentHandshake, session_id: &[u8; 16]) -> Result<Vec<[u8; MEMO_SIZE]>, ProtocolError> {
+    let json = serde_json::to_vec(handshake).map_err(ProtocolError::Json)?;
+    chunk_message(&json, MessageType::Handshake, session_id).map_err(ProtocolError::Memo)
 }
 
 /// Decode handshake memos back into an AgentHandshake.
@@ -44,7 +44,11 @@ pub fn decode_handshake(memos: &[[u8; MEMO_SIZE]]) -> Result<AgentHandshake, Pro
             actual: msg.msg_type,
         });
     }
-    serde_json::from_slice(&msg.data).map_err(ProtocolError::Json)
+    let handshake: AgentHandshake = serde_json::from_slice(&msg.data).map_err(ProtocolError::Json)?;
+    if handshake.protocol_version != 1 {
+        return Err(ProtocolError::UnsupportedVersion(handshake.protocol_version as u8));
+    }
+    Ok(handshake)
 }
 
 /// Complete a handshake by deriving the shared secret from our keypair and their handshake.
@@ -85,9 +89,9 @@ mod tests {
     fn encode_decode_handshake_roundtrip() {
         let keypair = AgentKeyPair::generate();
         let hs = create_handshake(&keypair, &["text", "command"]);
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
-        let memos = encode_handshake(&hs, &session_id);
+        let memos = encode_handshake(&hs, &session_id).unwrap();
         let decoded = decode_handshake(&memos).expect("decode should succeed");
 
         assert_eq!(decoded, hs);
@@ -111,11 +115,11 @@ mod tests {
     fn decode_handshake_with_wrong_message_type_returns_error() {
         let keypair = AgentKeyPair::generate();
         let hs = create_handshake(&keypair, &["text"]);
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
         // Encode as Text type instead of Handshake
         let json = serde_json::to_vec(&hs).unwrap();
-        let memos = memo_codec::chunk_message(&json, MessageType::Text, &session_id);
+        let memos = memo_codec::chunk_message(&json, MessageType::Text, &session_id).unwrap();
 
         let result = decode_handshake(&memos);
         assert!(result.is_err());
@@ -132,11 +136,11 @@ mod tests {
     fn handshake_with_empty_capabilities() {
         let keypair = AgentKeyPair::generate();
         let hs = create_handshake(&keypair, &[]);
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
         assert!(hs.capabilities.is_empty());
 
-        let memos = encode_handshake(&hs, &session_id);
+        let memos = encode_handshake(&hs, &session_id).unwrap();
         let decoded = decode_handshake(&memos).expect("decode");
         assert_eq!(decoded.capabilities, Vec::<String>::new());
     }
@@ -146,9 +150,9 @@ mod tests {
         let keypair = AgentKeyPair::generate();
         let caps = &["text", "command", "task", "payment", "binary"];
         let hs = create_handshake(&keypair, caps);
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
-        let memos = encode_handshake(&hs, &session_id);
+        let memos = encode_handshake(&hs, &session_id).unwrap();
         let decoded = decode_handshake(&memos).expect("decode");
         assert_eq!(
             decoded.capabilities,

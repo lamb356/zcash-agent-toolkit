@@ -32,6 +32,12 @@ pub enum ProtocolError {
     InvalidPublicKey,
     /// No cipher registered for the given session.
     UnknownSession,
+    /// Protocol version is not supported.
+    UnsupportedVersion(u8),
+    /// Session ID is already registered.
+    SessionAlreadyExists,
+    /// Replay attack detected (duplicate nonce).
+    ReplayDetected,
 }
 
 impl fmt::Display for ProtocolError {
@@ -45,6 +51,9 @@ impl fmt::Display for ProtocolError {
             }
             ProtocolError::InvalidPublicKey => write!(f, "invalid public key"),
             ProtocolError::UnknownSession => write!(f, "unknown session"),
+            ProtocolError::UnsupportedVersion(v) => write!(f, "unsupported protocol version: {v}"),
+            ProtocolError::SessionAlreadyExists => write!(f, "session already exists"),
+            ProtocolError::ReplayDetected => write!(f, "replay detected: duplicate nonce"),
         }
     }
 }

@@ -1,5 +1,6 @@
 import { ensureInit, getWasm } from './wasm.js';
 import type { DecodedMessage } from './types.js';
+import { bytesToHex, hexToBytes } from './hex.js';
 
 const MEMO_SIZE = 512;
 const encoder = new TextEncoder();
@@ -7,7 +8,7 @@ const encoder = new TextEncoder();
 /**
  * Codec for encoding/decoding structured messages into Zcash 512-byte memo fields.
  *
- * Handles automatic chunking for messages > 458 bytes, BLAKE3 content hashing,
+ * Handles automatic chunking for messages > 452 bytes, BLAKE3 content hashing,
  * and hex encoding for zcash-cli compatibility.
  */
 export class MemoCodec {
@@ -27,7 +28,7 @@ export class MemoCodec {
   /** Create a MemoCodec with a specific session ID (hex string). */
   static async fromSession(sessionHex: string): Promise<MemoCodec> {
     await ensureInit();
-    const bytes = hexToBytes(sessionHex);
+    const bytes = hexToBytes(sessionHex, 'sessionId');
     if (bytes.length !== 16) {
       throw new Error('Session ID must be 16 bytes (32 hex chars)');
     }
@@ -75,20 +76,6 @@ export class MemoCodec {
 
 // --- Helpers ---
 
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    bytes[i] = parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-  }
-  return bytes;
-}
-
 function flatToHexMemos(flat: Uint8Array): string[] {
   const count = flat.length / MEMO_SIZE;
   const memos: string[] = [];
@@ -102,7 +89,7 @@ function flatToHexMemos(flat: Uint8Array): string[] {
 function hexMemosToFlat(hexArray: string[]): Uint8Array {
   const flat = new Uint8Array(hexArray.length * MEMO_SIZE);
   for (let i = 0; i < hexArray.length; i++) {
-    const bytes = hexToBytes(hexArray[i]);
+    const bytes = hexToBytes(hexArray[i], `memo[${i}]`);
     flat.set(bytes, i * MEMO_SIZE);
   }
   return flat;

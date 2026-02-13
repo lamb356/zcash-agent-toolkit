@@ -5,6 +5,7 @@
  * The TypeScript wrapper classes handle this automatically.
  *
  * Supports both browser (fetch-based) and Node.js (fs-based) environments.
+ * If initialization fails, the next call to `ensureInit()` will retry.
  */
 
 let wasmModule: any = null;
@@ -21,23 +22,29 @@ export async function ensureInit(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const mod = await import('../wasm-pkg/zcash_agent_toolkit_wasm.js');
+    try {
+      const mod = await import('../wasm-pkg/zcash_agent_toolkit_wasm.js');
 
-    if (isNode) {
-      // Node.js: read .wasm from disk since fetch() doesn't support file:// URLs
-      const { readFileSync } = await import('node:fs');
-      const { fileURLToPath } = await import('node:url');
-      const { dirname, join } = await import('node:path');
-      const thisDir = dirname(fileURLToPath(import.meta.url));
-      const wasmPath = join(thisDir, '..', 'wasm-pkg', 'zcash_agent_toolkit_wasm_bg.wasm');
-      const wasmBytes = readFileSync(wasmPath);
-      mod.initSync({ module: wasmBytes });
-    } else {
-      await mod.default();
+      if (isNode) {
+        // Node.js: read .wasm from disk since fetch() doesn't support file:// URLs
+        const { readFileSync } = await import('node:fs');
+        const { fileURLToPath } = await import('node:url');
+        const { dirname, join } = await import('node:path');
+        const thisDir = dirname(fileURLToPath(import.meta.url));
+        const wasmPath = join(thisDir, '..', 'wasm-pkg', 'zcash_agent_toolkit_wasm_bg.wasm');
+        const wasmBytes = readFileSync(wasmPath);
+        mod.initSync({ module: wasmBytes });
+      } else {
+        await mod.default();
+      }
+
+      wasmModule = mod;
+      ready = true;
+    } catch (e) {
+      // Allow retry on next call.
+      initPromise = null;
+      throw e;
     }
-
-    wasmModule = mod;
-    ready = true;
   })();
 
   return initPromise;

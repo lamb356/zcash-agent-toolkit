@@ -23,7 +23,19 @@ impl ConversationManager {
     }
 
     /// Register a cipher for a session (typically called after handshake completes).
-    pub fn register_session(&mut self, session_id: [u8; 16], cipher: AgentCipher) {
+    ///
+    /// Returns an error if a session with this ID is already registered.
+    /// Use `replace_session` for explicit replacement.
+    pub fn register_session(&mut self, session_id: [u8; 16], cipher: AgentCipher) -> Result<(), ProtocolError> {
+        if self.ciphers.contains_key(&session_id) {
+            return Err(ProtocolError::SessionAlreadyExists);
+        }
+        self.ciphers.insert(session_id, cipher);
+        Ok(())
+    }
+
+    /// Explicitly replace the cipher for an existing session.
+    pub fn replace_session(&mut self, session_id: [u8; 16], cipher: AgentCipher) {
         self.ciphers.insert(session_id, cipher);
     }
 
@@ -40,8 +52,8 @@ impl ConversationManager {
             .ciphers
             .get(session_id)
             .ok_or(ProtocolError::UnknownSession)?;
-        let encrypted = cipher.encrypt(plaintext);
-        Ok(chunk_message(&encrypted, msg_type, session_id))
+        let encrypted = cipher.encrypt(plaintext).map_err(ProtocolError::Cipher)?;
+        chunk_message(&encrypted, msg_type, session_id).map_err(ProtocolError::Memo)
     }
 
     /// Decrypt and reassemble received memos.
@@ -72,13 +84,13 @@ mod tests {
         let bob = AgentKeyPair::generate();
 
         let shared_secret = alice.diffie_hellman(&bob.public_key_bytes());
-        let session_id = generate_session_id();
+        let session_id = generate_session_id().unwrap();
 
         let mut mgr_a = ConversationManager::new();
         let mut mgr_b = ConversationManager::new();
 
-        mgr_a.register_session(session_id, AgentCipher::new(&shared_secret));
-        mgr_b.register_session(session_id, AgentCipher::new(&shared_secret));
+        mgr_a.register_session(session_id, AgentCipher::new(&shared_secret)).unwrap();
+        mgr_b.register_session(session_id, AgentCipher::new(&shared_secret)).unwrap();
 
         (session_id, mgr_a, mgr_b)
     }
@@ -106,18 +118,18 @@ mod tests {
         let secret_ab = alice.diffie_hellman(&bob.public_key_bytes());
         let secret_ac = alice.diffie_hellman(&carol.public_key_bytes());
 
-        let session_ab = generate_session_id();
-        let session_ac = generate_session_id();
+        let session_ab = generate_session_id().unwrap();
+        let session_ac = generate_session_id().unwrap();
 
         let mut mgr_alice = ConversationManager::new();
-        mgr_alice.register_session(session_ab, AgentCipher::new(&secret_ab));
-        mgr_alice.register_session(session_ac, AgentCipher::new(&secret_ac));
+        mgr_alice.register_session(session_ab, AgentCipher::new(&secret_ab)).unwrap();
+        mgr_alice.register_session(session_ac, AgentCipher::new(&secret_ac)).unwrap();
 
         let mut mgr_bob = ConversationManager::new();
-        mgr_bob.register_session(session_ab, AgentCipher::new(&secret_ab));
+        mgr_bob.register_session(session_ab, AgentCipher::new(&secret_ab)).unwrap();
 
         let mut mgr_carol = ConversationManager::new();
-        mgr_carol.register_session(session_ac, AgentCipher::new(&secret_ac));
+        mgr_carol.register_session(session_ac, AgentCipher::new(&secret_ac)).unwrap();
 
         // Alice sends to Bob
         let msg_to_bob = b"Secret for Bob";
@@ -149,7 +161,7 @@ mod tests {
     #[test]
     fn unknown_session_returns_error() {
         let mgr = ConversationManager::new();
-        let unknown_session = generate_session_id();
+        let unknown_session = generate_session_id().unwrap();
 
         let result = mgr.send_message(&unknown_session, MessageType::Text, b"test");
         assert!(result.is_err());
