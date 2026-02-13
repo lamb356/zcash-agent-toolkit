@@ -1,0 +1,13 @@
+[package]
+name = "agent-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memo-codec = { workspace = true }
+crypto-primitives = { workspace = true }
+address-utils = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
