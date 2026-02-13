@@ -1,5 +1,28 @@
+use std::fmt;
+
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
+
+/// Errors from key exchange operations.
+#[derive(Debug)]
+pub enum KeyExchangeError {
+    /// The supplied secret key material is invalid for key pair construction.
+    InvalidSecret,
+    /// The Diffie-Hellman shared secret was all zeros and considered invalid.
+    InvalidSharedSecret,
+}
+
+impl fmt::Display for KeyExchangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyExchangeError::InvalidSecret => write!(f, "invalid secret key material"),
+            KeyExchangeError::InvalidSharedSecret => write!(f, "invalid shared secret"),
+        }
+    }
+}
+
+impl std::error::Error for KeyExchangeError {}
 
 /// An X25519 keypair for agent-to-agent key exchange.
 pub struct AgentKeyPair {
@@ -15,11 +38,21 @@ impl AgentKeyPair {
         Self { secret, public }
     }
 
-    /// Reconstruct a keypair from raw secret key bytes.
-    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(bytes);
+    /// Create a keypair from raw secret key bytes.
+    ///
+    /// WARNING: Only use with properly derived key material.
+    pub fn from_secret_bytes(secret: [u8; 32]) -> Result<Self, KeyExchangeError> {
+        if secret == [0u8; 32] {
+            return Err(KeyExchangeError::InvalidSecret);
+        }
+        let secret = StaticSecret::from(secret);
         let public = PublicKey::from(&secret);
-        Self { secret, public }
+        Ok(Self { secret, public })
+    }
+
+    /// Erase the internal secret key from memory.
+    pub(crate) fn zeroize_secret(&mut self) {
+        self.secret.zeroize();
     }
 
     /// Return the public key as a 32-byte array.
@@ -72,8 +105,15 @@ mod tests {
     fn from_secret_bytes_roundtrip() {
         let original = AgentKeyPair::generate();
         let secret_bytes = original.secret_key_bytes();
-        let restored = AgentKeyPair::from_secret_bytes(secret_bytes);
+        let restored = AgentKeyPair::from_secret_bytes(secret_bytes).unwrap();
         assert_eq!(original.public_key_bytes(), restored.public_key_bytes());
+    }
+
+    #[test]
+    fn from_secret_bytes_rejects_all_zero_secret() {
+        let zero = [0u8; 32];
+        let result = AgentKeyPair::from_secret_bytes(zero);
+        assert!(matches!(result, Err(KeyExchangeError::InvalidSecret)));
     }
 
     #[test]

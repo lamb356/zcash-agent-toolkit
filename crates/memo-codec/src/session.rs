@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use crate::chunk::{decode_memo, encode_memo, MemoError, MemoHeader};
 use crate::types::{MessageType, MEMO_SIZE, PAYLOAD_SIZE, PROTOCOL_VERSION};
+
+type ChunkMap = HashMap<[u8; 16], HashMap<u16, (MemoHeader, Vec<u8>)>>;
 #[cfg(test)]
 use crate::types::HEADER_SIZE;
 
@@ -150,7 +152,7 @@ pub fn decode_chunked_message(memos: &[[u8; MEMO_SIZE]]) -> Result<ReassembledMe
 #[derive(Debug)]
 pub struct ReassemblyBuffer {
     /// Map from session_id to a map from chunk_index to (header, payload).
-    sessions: HashMap<[u8; 16], HashMap<u16, (MemoHeader, Vec<u8>)>>,
+    sessions: ChunkMap,
     /// Maximum number of concurrent sessions.
     max_sessions: usize,
     /// Track creation order for eviction (session_id, insertion order).

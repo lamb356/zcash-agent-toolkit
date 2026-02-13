@@ -3,6 +3,8 @@ export { MemoCodec } from './memo.js';
 export { AgentSession } from './session.js';
 export { TaskManager } from './task.js';
 export { validateHex, hexToBytes, bytesToHex } from './hex.js';
+export { SecureSession } from './ratchet.js';
+export { RotatingKeys, deriveAgentFromSeed, agentIdFromSeed } from './keys.js';
 export {
   blake3Hash,
   blake3Hex,

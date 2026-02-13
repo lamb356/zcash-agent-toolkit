@@ -85,25 +85,19 @@ pub struct WasmAgentKeyPair {
     inner: crypto_primitives::AgentKeyPair,
 }
 
+impl Default for WasmAgentKeyPair {
+    fn default() -> Self {
+        Self {
+            inner: crypto_primitives::AgentKeyPair::generate(),
+        }
+    }
+}
+
 #[wasm_bindgen]
 impl WasmAgentKeyPair {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmAgentKeyPair {
-        WasmAgentKeyPair {
-            inner: crypto_primitives::AgentKeyPair::generate(),
-        }
-    }
-
-    #[wasm_bindgen(js_name = "fromSecretBytes")]
-    pub fn from_secret_bytes(bytes: &[u8]) -> Result<WasmAgentKeyPair, JsError> {
-        if bytes.len() != 32 {
-            return Err(JsError::new("secret key must be 32 bytes"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        Ok(WasmAgentKeyPair {
-            inner: crypto_primitives::AgentKeyPair::from_secret_bytes(arr),
-        })
+        Self::default()
     }
 
     #[wasm_bindgen(js_name = "publicKeyBytes")]
@@ -125,6 +119,117 @@ impl WasmAgentKeyPair {
         arr.copy_from_slice(peer_public);
         Ok(self.inner.diffie_hellman(&arr).to_vec())
     }
+}
+
+#[wasm_bindgen]
+pub struct WasmRatchetState {
+    inner: crypto_primitives::RatchetState,
+}
+
+#[wasm_bindgen]
+impl WasmRatchetState {
+    #[wasm_bindgen(constructor)]
+    pub fn new(root_key: &[u8]) -> Result<WasmRatchetState, JsError> {
+        if root_key.len() != 32 {
+            return Err(JsError::new("root_key must be 32 bytes"));
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(root_key);
+        Ok(WasmRatchetState {
+            inner: crypto_primitives::RatchetState::new(key),
+        })
+    }
+
+    #[wasm_bindgen(js_name = ratchetForward)]
+    pub fn ratchet_forward(&mut self) -> Result<JsValue, JsError> {
+        let (key, index) = self.inner.ratchet_forward();
+        let obj = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &obj,
+            &"messageKey".into(),
+            &hex::encode(key).into(),
+        )
+        .map_err(jsval_err)?;
+        js_sys::Reflect::set(
+            &obj,
+            &"messageIndex".into(),
+            &JsValue::from_f64(index as f64),
+        )
+        .map_err(jsval_err)?;
+        Ok(obj.into())
+    }
+
+    #[wasm_bindgen(js_name = getMessageKey)]
+    pub fn get_message_key(&mut self, index: u64) -> Result<String, JsError> {
+        let key = self
+            .inner
+            .get_message_key(index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(hex::encode(key))
+    }
+}
+
+#[wasm_bindgen]
+pub struct WasmRotatingKeyPair {
+    inner: crypto_primitives::RotatingKeyPair,
+}
+
+#[wasm_bindgen]
+impl WasmRotatingKeyPair {
+    #[wasm_bindgen(constructor)]
+    pub fn new(created_at: u64) -> Result<WasmRotatingKeyPair, JsError> {
+        let inner = crypto_primitives::RotatingKeyPair::new(created_at)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(WasmRotatingKeyPair { inner })
+    }
+
+    pub fn rotate(&mut self, now: u64) -> Result<(), JsError> {
+        self.inner
+            .rotate(now)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = currentPublicKey)]
+    pub fn current_public_key(&self) -> String {
+        hex::encode(self.inner.current_public_key())
+    }
+
+    pub fn generation(&self) -> u32 {
+        self.inner.generation()
+    }
+
+    #[wasm_bindgen(js_name = shouldRotate)]
+    pub fn should_rotate(&self, max_age_secs: u64, max_messages: u32, _now: u64) -> bool {
+        self.inner.should_rotate(max_age_secs, max_messages)
+    }
+}
+
+#[wasm_bindgen(js_name = deriveAgentFromSeed)]
+pub fn derive_agent_from_seed(
+    seed: &[u8],
+    agent_index: u32,
+) -> Result<WasmAgentKeyPair, JsError> {
+    if seed.len() != 32 {
+        return Err(JsError::new("seed must be 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(seed);
+    let keypair =
+        crypto_primitives::AgentKeyDerivation::from_seed(&seed_arr, agent_index)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(WasmAgentKeyPair { inner: keypair })
+}
+
+#[wasm_bindgen(js_name = agentIdFromSeed)]
+pub fn agent_id_from_seed(seed: &[u8], agent_index: u32) -> Result<String, JsError> {
+    if seed.len() != 32 {
+        return Err(JsError::new("seed must be 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(seed);
+    let id = crypto_primitives::AgentKeyDerivation::agent_id_from_seed(&seed_arr, agent_index)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    Ok(hex::encode(id))
 }
 
 // === AgentCipher wrapper ===
@@ -397,7 +502,7 @@ fn flatten_memos(memos: &[[u8; 512]]) -> Vec<u8> {
 }
 
 fn unflatten_memos(flat: &[u8]) -> Result<Vec<[u8; 512]>, JsError> {
-    if flat.len() % 512 != 0 || flat.is_empty() {
+    if !flat.len().is_multiple_of(512) || flat.is_empty() {
         return Err(JsError::new(
             "memos must be a non-empty multiple of 512 bytes",
         ));

@@ -9,6 +9,7 @@ use crate::ProtocolError;
 ///
 /// Each session is identified by a 16-byte session ID and has its own
 /// `AgentCipher` for encryption/decryption.
+#[derive(Default)]
 pub struct ConversationManager {
     /// Map from session_id to cipher for that session.
     ciphers: HashMap<[u8; 16], AgentCipher>,
@@ -17,9 +18,7 @@ pub struct ConversationManager {
 impl ConversationManager {
     /// Create a new empty conversation manager.
     pub fn new() -> Self {
-        Self {
-            ciphers: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a cipher for a session (typically called after handshake completes).
