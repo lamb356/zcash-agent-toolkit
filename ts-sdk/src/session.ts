@@ -1,129 +1,133 @@
 import { ensureInit, getWasm } from './wasm.js';
 import type { AgentHandshake } from './types.js';
-import { bytesToHex, hexToBytes } from './hex.js';
 
 const MEMO_SIZE = 512;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 /**
- * A full encrypted agent session.
+ * Protocol-only agent session.
  *
- * Manages keypair generation, handshake exchange, shared secret derivation,
- * and encrypted message sending/receiving.
+ * Tracks identity and capabilities and handles memo-based message encoding/decoding.
+ * No local encryption state is stored or managed here; Zcash shielded memos provide
+ * confidentiality.
  */
 export class AgentSession {
-  private _keypair: any; // WasmAgentKeyPair
-  private _cipher: any | null = null; // WasmAgentCipher
+  private _agentId: string;
+  private _capabilities: string[];
   private _sessionId: Uint8Array;
 
-  private constructor(keypair: any, sessionId: Uint8Array) {
-    this._keypair = keypair;
+  private constructor(agentId: string, capabilities: string[], sessionId: Uint8Array) {
+    this._agentId = agentId;
+    this._capabilities = capabilities;
     this._sessionId = sessionId;
   }
 
-  /** Create a new agent session with a fresh keypair and random session ID. */
-  static async create(): Promise<AgentSession> {
+  /**
+   * Create a protocol session with a deterministic agent identifier and capabilities.
+   */
+  static async create(agentId: string, capabilities: string[]): Promise<AgentSession> {
+    if (!agentId) {
+      throw new Error('agentId is required');
+    }
     await ensureInit();
-    const wasm = getWasm();
-    const keypair = new wasm.WasmAgentKeyPair();
-    const sessionId = wasm.generateSessionId();
-    return new AgentSession(keypair, sessionId);
+    const sessionId = getWasm().generateSessionId();
+    return new AgentSession(agentId, [...capabilities], sessionId);
   }
 
-  /** Get the agent's public key as a hex string. */
-  get publicKey(): string {
-    return this._keypair.publicKeyHex();
-  }
-
-  /** Get the agent's deterministic ID (BLAKE3 hash of public key). */
+  /**
+   * Current agent identifier.
+   */
   get agentId(): string {
-    return getWasm().agentIdFromPubkey(this._keypair.publicKeyBytes());
+    return this._agentId;
   }
 
-  /** Get the session ID as a hex string. */
-  get sessionId(): string {
-    return bytesToHex(this._sessionId);
+  /**
+   * Current capabilities.
+   */
+  get capabilities(): string[] {
+    return [...this._capabilities];
   }
 
-  /** Derive shared secret from peer's public key (hex). Returns shared secret hex. */
-  async deriveSharedSecret(peerPublicKeyHex: string): Promise<string> {
-    const peerBytes = hexToBytes(peerPublicKeyHex, 'peerPublicKey');
-    const secret = this._keypair.diffieHellman(peerBytes);
-    this._cipher = new (getWasm().WasmAgentCipher)(secret);
-    return bytesToHex(secret);
+  /**
+   * Session identifier used for protocol message threading.
+   */
+  get sessionId(): Uint8Array {
+    return this._sessionId;
   }
 
-  /** Encrypt plaintext string. Requires deriveSharedSecret to have been called. */
-  encrypt(plaintext: string): string {
-    if (!this._cipher) throw new Error('No shared secret derived. Call deriveSharedSecret first.');
-    const data = encoder.encode(plaintext);
-    const encrypted = this._cipher.encrypt(data);
-    return bytesToHex(encrypted);
+  /**
+   * Encode this agent's identity and capabilities as handshake memos.
+   */
+  createHandshake(): Uint8Array[] {
+    const handshake = getWasm().createHandshake(this._agentId, this._capabilities) as AgentHandshake;
+    const flat = getWasm().encodeHandshake(handshake, this._sessionId);
+    return unflatten(flat);
   }
 
-  /** Decrypt hex-encoded ciphertext. */
-  decrypt(encryptedHex: string): string {
-    if (!this._cipher) throw new Error('No shared secret derived. Call deriveSharedSecret first.');
-    const data = hexToBytes(encryptedHex, 'ciphertext');
-    const decrypted = this._cipher.decrypt(data);
-    return decoder.decode(decrypted);
+  /**
+   * Process a received handshake payload and return identity details.
+   */
+  processHandshake(memos: Uint8Array[]): {
+    agentId: string;
+    capabilities: string[];
+  } {
+    const flat = flatten(memos);
+    const handshake: AgentHandshake = getWasm().decodeHandshake(flat);
+    return {
+      agentId: handshake.agent_id,
+      capabilities: handshake.capabilities,
+    };
   }
 
-  /** Create a handshake and encode it as hex memo strings. */
-  async createHandshake(
-    capabilities: string[] = [],
-  ): Promise<{ handshake: AgentHandshake; memos: string[] }> {
-    const wasm = getWasm();
-    const handshake = wasm.createHandshake(this._keypair, capabilities);
-    const flat = wasm.encodeHandshake(handshake, this._sessionId);
-    return { handshake, memos: flatToHexMemos(flat) };
+  /** Encode text as memo chunks for Text message type. */
+  encodeMessage(text: string): Uint8Array[] {
+    const data = encoder.encode(text);
+    const flat = getWasm().encodeMemos(data, 0x02, this._sessionId);
+    return unflatten(flat);
   }
 
-  /** Process a received handshake from hex memos. Returns the peer's handshake. */
-  async processHandshake(memoHexArray: string[]): Promise<AgentHandshake> {
-    const flat = hexMemosToFlat(memoHexArray);
-    return getWasm().decodeHandshake(flat);
-  }
-
-  /** Encrypt a command object and encode as hex memo strings. */
-  async sendCommand(command: object): Promise<string[]> {
-    if (!this._cipher) throw new Error('No shared secret derived.');
-    const json = JSON.stringify(command);
-    const data = encoder.encode(json);
-    const encrypted = this._cipher.encrypt(data);
-    const flat = getWasm().encodeMemos(encrypted, 0x03, this._sessionId);
-    return flatToHexMemos(flat);
-  }
-
-  /** Decode and decrypt command memos back into an object. */
-  async receiveCommand(memoHexArray: string[]): Promise<object> {
-    if (!this._cipher) throw new Error('No shared secret derived.');
-    const flat = hexMemosToFlat(memoHexArray);
+  /** Decode memo chunks into text. */
+  decodeMessage(memos: Uint8Array[]): string {
+    const flat = flatten(memos);
     const decoded = getWasm().decodeMemos(flat);
-    const decrypted = this._cipher.decrypt(decoded.data);
-    const json = decoder.decode(decrypted);
-    return JSON.parse(json);
+    return decoder.decode(decoded.data);
+  }
+
+  /** Encode command JSON as memo chunks for Command message type. */
+  encodeCommand(command: string): Uint8Array[] {
+    const data = encoder.encode(command);
+    const flat = getWasm().encodeMemos(data, 0x03, this._sessionId);
+    return unflatten(flat);
+  }
+
+  /** Decode command memo chunks into UTF-8 string. */
+  decodeCommand(memos: Uint8Array[]): string {
+    const flat = flatten(memos);
+    const decoded = getWasm().decodeMemos(flat);
+    return decoder.decode(decoded.data);
   }
 }
 
-// --- Helpers ---
-
-function flatToHexMemos(flat: Uint8Array): string[] {
-  const count = flat.length / MEMO_SIZE;
-  const memos: string[] = [];
-  for (let i = 0; i < count; i++) {
-    const slice = flat.slice(i * MEMO_SIZE, (i + 1) * MEMO_SIZE);
-    memos.push(bytesToHex(slice));
-  }
-  return memos;
-}
-
-function hexMemosToFlat(hexArray: string[]): Uint8Array {
-  const flat = new Uint8Array(hexArray.length * MEMO_SIZE);
-  for (let i = 0; i < hexArray.length; i++) {
-    const bytes = hexToBytes(hexArray[i], `memo[${i}]`);
-    flat.set(bytes, i * MEMO_SIZE);
+function flatten(memos: Uint8Array[]): Uint8Array {
+  const flat = new Uint8Array(memos.length * MEMO_SIZE);
+  for (let i = 0; i < memos.length; i++) {
+    if (memos[i].length !== MEMO_SIZE) {
+      throw new Error('each memo must be exactly 512 bytes');
+    }
+    flat.set(memos[i], i * MEMO_SIZE);
   }
   return flat;
+}
+
+function unflatten(flat: Uint8Array): Uint8Array[] {
+  if (!flat.length || flat.length % MEMO_SIZE !== 0) {
+    throw new Error('flat memo payload must be a non-empty multiple of 512 bytes');
+  }
+  const count = flat.length / MEMO_SIZE;
+  const memos: Uint8Array[] = [];
+  for (let i = 0; i < count; i++) {
+    memos.push(flat.slice(i * MEMO_SIZE, (i + 1) * MEMO_SIZE));
+  }
+  return memos;
 }

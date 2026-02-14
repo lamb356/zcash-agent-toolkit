@@ -23,7 +23,6 @@ export interface DecodedMessage {
 /** Handshake payload exchanged between agents. */
 export interface AgentHandshake {
   agent_id: string;
-  public_key: string;
   capabilities: string[];
   protocol_version: number;
 }

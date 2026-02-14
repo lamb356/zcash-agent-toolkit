@@ -1,113 +1,99 @@
 # Zcash Agent Toolkit
 
-**Private AI agent communication over Zcash shielded memos.**
+**Structured AI agent communication over Zcash shielded memos.**
 
-AI agents need to talk to each other. But every existing transport — HTTP, WebSockets, message queues — leaks metadata: who's talking, when, how often, and to whom. Zcash shielded memos fix this. On-chain, all memos look identical. No observer can tell which agents are communicating or what they're saying.
+AI agents need to communicate privately. Zcash shielded memos provide exactly this: every memo is encrypted to the recipient, with sender, receiver, amount, and content all hidden on-chain. This toolkit provides a structured protocol layer on top of Zcash's built-in confidentiality and integrity.
 
-This toolkit gives agents a complete encrypted communication stack built on Zcash's 512-byte memo field:
+No redundant encryption. No unnecessary key exchange. A clean protocol that trusts Zcash to do what Zcash does best.
 
-- **Structured protocol** — 60-byte header + 452-byte payload with automatic chunking for large messages
-- **End-to-end encryption** — X25519 key exchange + ChaCha20-Poly1305, on top of Zcash's native shielded encryption
-- **Forward secrecy** — BLAKE3-based symmetric ratchet. Old keys are zeroized. Compromising today's key reveals nothing about yesterday's messages.
-- **Key rotation** — Per-session keypair rotation with previous-key fallback for in-flight messages
-- **Zcash key derivation** — Agent identity derived from seed via domain-separated BLAKE3 KDF, tying agents to Zcash addresses
-- **Task/bounty workflows** — Built-in TaskAssign → TaskProof → PaymentConfirm protocol with anti-replay nonces
-- **Rust + WASM + TypeScript** — Use from any environment
+## What This Provides
+
+- **Structured memo protocol**  60-byte header + 452-byte payload in Zcash's 512-byte memo field
+- **Automatic chunking**  Messages >452 bytes split across multiple memos with reassembly
+- **BLAKE3 integrity hashes**  Content hash in every memo header for application-level verification
+- **Agent identity**  Deterministic agent IDs derived from seed via BLAKE3 KDF
+- **Task/bounty workflows**  TaskAssign  TaskProof  PaymentConfirm with anti-replay nonces
+- **Metadata privacy**  All memos zero-padded to exactly 512 bytes
+- **Rust + WASM + TypeScript**  Use from any environment
+
+## Why No Custom Encryption?
+
+Zcash shielded transactions already encrypt memos to the recipient's incoming viewing key using state-of-the-art cryptography. The sender, receiver, amount, and memo content are all hidden from observers. Adding another encryption layer on top would be redundant.
+
+This toolkit focuses on what Zcash doesn't provide: a structured message protocol for agent-to-agent communication, automatic chunking, session management, and task workflows. Zcash handles the crypto. We handle the protocol.
 
 ## Quick Example
 
 ```typescript
 import { AgentSession, MemoCodec, TaskManager } from '@zcash-agent/toolkit';
 
-// Two agents establish an encrypted session
-const alice = await AgentSession.create();
-const bob = await AgentSession.create();
+// Two agents identify themselves
+const alice = await AgentSession.create('alice-agent', ['task-assignment']);
+const bob = await AgentSession.create('bob-agent', ['task-execution']);
 
-// Exchange public keys (via initial shielded memo)
-const aliceHandshake = alice.createHandshake('alice-agent', ['task-execution']);
-const bobHandshake = bob.createHandshake('bob-agent', ['task-assignment']);
+// Exchange identities via shielded memos
+const handshakeMemos = alice.createHandshake();
+//  Send handshakeMemos as Zcash shielded memo(s) to Bob's address
+//  Zcash encrypts them automatically
 
-// Derive shared secret from Diffie-Hellman
-alice.deriveSharedSecret(bob.publicKey());
-bob.deriveSharedSecret(alice.publicKey());
+const peerInfo = bob.processHandshake(handshakeMemos);
+// peerInfo = { agentId: 'alice-agent', capabilities: ['task-assignment'] }
 
-// Encrypt a command — ready to embed in a Zcash shielded memo
-const encrypted = alice.encrypt('Execute privacy audit on contract 0x...');
-const decrypted = bob.decrypt(encrypted);
+// Encode a command for memo transport
+const commandMemos = alice.encodeCommand('Audit contract 0xABC for privacy leaks');
+//  Send as shielded memo(s)  Zcash encrypts
 
-// Task workflow with payment
-const task = TaskManager.assignTask(alice, {
+const command = bob.decodeCommand(commandMemos);
+// command = 'Audit contract 0xABC for privacy leaks'
+
+// Task workflow
+const taskMemos = TaskManager.assignTask({
   description: 'Audit smart contract for privacy leaks',
   reward: '0.5 ZEC',
   deadline: Date.now() + 86400000,
 });
+//  Send as shielded memos
 
-const proof = TaskManager.submitProof(bob, task, {
-  result: 'No privacy leaks found. Full report attached.',
+const proofMemos = TaskManager.submitProof(taskMemos, {
+  result: 'No privacy leaks found.',
   evidence: 'ipfs://Qm...',
 });
 
-const payment = TaskManager.confirmPayment(alice, proof, {
+const paymentMemos = TaskManager.confirmPayment(proofMemos, {
   txid: 'zcash-tx-hash...',
   amount: '0.5 ZEC',
 });
 ```
 
-## Demo
-
-Open [`demo/index.html`](demo/index.html) in a browser to see a visual simulation of two agents communicating over shielded memos.
-
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                  TypeScript SDK                       │
-│  AgentSession │ MemoCodec │ TaskManager               │
-│  SecureSession │ RotatingKeys │ deriveAgentFromSeed   │
-├──────────────┬──────────────┬────────────────────────┤
-│              │  WASM Bindings (wasm-bindgen)          │
-├──────────────┼──────────────┼────────────────────────┤
-│  memo-codec  │   crypto-    │  agent-protocol        │
-│              │  primitives  │                         │
-│  512-byte    │  BLAKE3      │  Handshake             │
-│  encode/     │  X25519      │  Task/Bounty           │
-│  decode      │  ChaCha20    │  Encrypted relay       │
-│  chunking    │  Ratchet     │                         │
-│  reassembly  │  Rotation    │  address-utils         │
-│              │  Zeroize     │  Zcash key derivation  │
-└──────────────┴──────────────┴────────────────────────┘
+
+                  TypeScript SDK                    
+    AgentSession  MemoCodec  TaskManager         
+
+                  WASM Bindings                     
+
+   memo-       crypto-    address-     agent-  
+   codec      primitives    utils     protocol 
+
+ 512-byte    BLAKE3       Agent IDs  Handshake 
+ encode/     Random       classify   Tasks     
+ decode      Agent IDs     Validate   Sessions  
+ chunking     Anti-     Reassembly        
+ Reassembly    replay
+
+                                             
+
+          Zcash Shielded Transaction Layer         
+  Encryption  Integrity  Metadata Privacy        
+        (provided by Zcash, not this toolkit)      
+
 ```
-
-## Security Properties
-
-| Property | How |
-|---|---|
-| **Confidentiality** | Zcash shielded encryption + ChaCha20-Poly1305 |
-| **Integrity** | BLAKE3 content hash in every memo header |
-| **Forward secrecy** | Symmetric ratchet with chain key zeroization |
-| **Authentication** | X25519 Diffie-Hellman key exchange |
-| **Anti-replay** | Nonces on task messages + consumed key tracking |
-| **Metadata privacy** | All memos zero-padded to exactly 512 bytes |
-| **Key hygiene** | Zeroize on drop for all secret material |
-
-## Message Types
-
-| Type | Code | Use Case |
-|---|---|---|
-| Handshake | 0x01 | Exchange public keys and capabilities |
-| Text | 0x02 | General encrypted messages |
-| Command | 0x03 | Agent instructions |
-| Response | 0x04 | Command results |
-| Ack | 0x05 | Delivery confirmation |
-| Close | 0x06 | Session termination |
-| Binary | 0x07 | Arbitrary binary data |
-| TaskAssign | 0x10 | Assign work with reward |
-| TaskProof | 0x11 | Submit proof of completion |
-| PaymentConfirm | 0x12 | Confirm ZEC payment |
 
 ## Wire Format
 
-Every Zcash memo is exactly 512 bytes:
+Every memo is exactly 512 bytes:
 
 ```
 [0]       Protocol version (0x01)
@@ -118,10 +104,23 @@ Every Zcash memo is exactly 512 bytes:
 [22..54]  BLAKE3 content hash (32 bytes)
 [54..56]  Payload length (u16 BE)
 [56..60]  Reserved (4 bytes, 0x00)
-[60..512] Payload (452 bytes, zero-padded)
+[60..512]  Payload (452 bytes, zero-padded)
 ```
 
-Messages larger than 452 bytes are automatically chunked across multiple memos with the same session ID and content hash. The reassembly buffer handles out-of-order delivery.
+## Message Types
+
+| Type | Code | Use Case |
+|---|---|---|
+| Handshake | 0x01 | Exchange agent identity and capabilities |
+| Text | 0x02 | General messages |
+| Command | 0x03 | Agent instructions |
+| Response | 0x04 | Command results |
+| Ack | 0x05 | Delivery confirmation |
+| Close | 0x06 | Session termination |
+| Binary | 0x07 | Arbitrary binary data |
+| TaskAssign | 0x10 | Assign work with reward |
+| TaskProof | 0x11 | Submit proof of completion |
+| PaymentConfirm | 0x12 | Confirm ZEC payment |
 
 ## Building
 
@@ -133,24 +132,18 @@ cargo test --workspace
 wasm-pack build crates/wasm-bindings --target web --out-dir ../../ts-sdk/wasm-pkg --release
 
 # TypeScript
-cd ts-sdk
-npm install
-npx tsup
-npm test
+cd ts-sdk && npm install && npx tsup && npm test
 ```
 
-## Test Coverage
+## Demo
 
-- **115 Rust tests** across 5 crates (codec, crypto, address, protocol, WASM)
-- **70 TypeScript tests** across 7 test files
-- Forward secrecy proofs, replay rejection, key rotation, full protocol simulations
+Open `demo/index.html` in a browser to see a visual simulation of two agents communicating over shielded memos.
 
 ## Related Work
 
-- **[BLAKE3 WASM](https://lamb356.github.io/blake3-wasm/)** — Browser BLAKE3 implementation (collaboration with Zooko Wilcox)
-- **FROST Multi-Sig UI** — Threshold cryptography interface for Zcash
-- **PCZT Tooling** — Partially Constructed Zcash Transaction RPC methods
-- **Zchat / zsend.xyz** — Private messenger built on Zcash memos (potential integration)
+- **[BLAKE3 WASM](https://lamb356.github.io/blake3-wasm/)**  Browser BLAKE3 implementation
+- **FROST Multi-Sig UI**  Threshold cryptography interface for Zcash
+- **PCZT Tooling**  Partially Constructed Zcash Transaction RPC methods
 
 ## License
 

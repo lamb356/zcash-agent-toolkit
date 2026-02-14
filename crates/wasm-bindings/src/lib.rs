@@ -29,14 +29,12 @@ pub fn js_blake3_keyed_hash(key: &[u8], data: &[u8]) -> Result<Vec<u8>, JsError>
 
 #[wasm_bindgen(js_name = "randomBytes")]
 pub fn js_random_bytes(len: usize) -> Result<Vec<u8>, JsError> {
-    crypto_primitives::random_bytes(len)
-        .map_err(|e| JsError::new(&e.to_string()))
+    crypto_primitives::random_bytes(len).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "randomHex")]
 pub fn js_random_hex(byte_len: usize) -> Result<String, JsError> {
-    crypto_primitives::random_hex(byte_len)
-        .map_err(|e| JsError::new(&e.to_string()))
+    crypto_primitives::random_hex(byte_len).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "generateSessionId")]
@@ -78,233 +76,14 @@ pub fn js_agent_id_from_pubkey(pubkey: &[u8]) -> Result<String, JsError> {
     Ok(address_utils::agent_id_from_pubkey(&arr))
 }
 
-// === AgentKeyPair wrapper ===
-
-#[wasm_bindgen]
-pub struct WasmAgentKeyPair {
-    inner: crypto_primitives::AgentKeyPair,
-}
-
-impl Default for WasmAgentKeyPair {
-    fn default() -> Self {
-        Self {
-            inner: crypto_primitives::AgentKeyPair::generate(),
-        }
-    }
-}
-
-#[wasm_bindgen]
-impl WasmAgentKeyPair {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> WasmAgentKeyPair {
-        Self::default()
-    }
-
-    #[wasm_bindgen(js_name = "publicKeyBytes")]
-    pub fn public_key_bytes(&self) -> Vec<u8> {
-        self.inner.public_key_bytes().to_vec()
-    }
-
-    #[wasm_bindgen(js_name = "publicKeyHex")]
-    pub fn public_key_hex(&self) -> String {
-        self.inner.public_key_hex()
-    }
-
-    #[wasm_bindgen(js_name = "diffieHellman")]
-    pub fn diffie_hellman(&self, peer_public: &[u8]) -> Result<Vec<u8>, JsError> {
-        if peer_public.len() != 32 {
-            return Err(JsError::new("peer public key must be 32 bytes"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(peer_public);
-        Ok(self.inner.diffie_hellman(&arr).to_vec())
-    }
-}
-
-#[wasm_bindgen]
-pub struct WasmRatchetState {
-    inner: crypto_primitives::RatchetState,
-}
-
-#[wasm_bindgen]
-impl WasmRatchetState {
-    #[wasm_bindgen(constructor)]
-    pub fn new(root_key: &[u8]) -> Result<WasmRatchetState, JsError> {
-        if root_key.len() != 32 {
-            return Err(JsError::new("root_key must be 32 bytes"));
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(root_key);
-        Ok(WasmRatchetState {
-            inner: crypto_primitives::RatchetState::new(key),
-        })
-    }
-
-    #[wasm_bindgen(js_name = ratchetForward)]
-    pub fn ratchet_forward(&mut self) -> Result<JsValue, JsError> {
-        let (key, index) = self.inner.ratchet_forward();
-        let obj = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &obj,
-            &"messageKey".into(),
-            &hex::encode(key).into(),
-        )
-        .map_err(jsval_err)?;
-        js_sys::Reflect::set(
-            &obj,
-            &"messageIndex".into(),
-            &JsValue::from_f64(index as f64),
-        )
-        .map_err(jsval_err)?;
-        Ok(obj.into())
-    }
-
-    #[wasm_bindgen(js_name = getMessageKey)]
-    pub fn get_message_key(&mut self, index: u64) -> Result<String, JsError> {
-        let key = self
-            .inner
-            .get_message_key(index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(hex::encode(key))
-    }
-}
-
-#[wasm_bindgen]
-pub struct WasmRotatingKeyPair {
-    inner: crypto_primitives::RotatingKeyPair,
-}
-
-#[wasm_bindgen]
-impl WasmRotatingKeyPair {
-    #[wasm_bindgen(constructor)]
-    pub fn new(created_at: u64) -> Result<WasmRotatingKeyPair, JsError> {
-        let inner = crypto_primitives::RotatingKeyPair::new(created_at)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(WasmRotatingKeyPair { inner })
-    }
-
-    pub fn rotate(&mut self, now: u64) -> Result<(), JsError> {
-        self.inner
-            .rotate(now)
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    #[wasm_bindgen(js_name = currentPublicKey)]
-    pub fn current_public_key(&self) -> String {
-        hex::encode(self.inner.current_public_key())
-    }
-
-    pub fn generation(&self) -> u32 {
-        self.inner.generation()
-    }
-
-    #[wasm_bindgen(js_name = shouldRotate)]
-    pub fn should_rotate(&self, max_age_secs: u64, max_messages: u32, _now: u64) -> bool {
-        self.inner.should_rotate(max_age_secs, max_messages)
-    }
-}
-
-#[wasm_bindgen(js_name = deriveAgentFromSeed)]
-pub fn derive_agent_from_seed(
-    seed: &[u8],
-    agent_index: u32,
-) -> Result<WasmAgentKeyPair, JsError> {
-    if seed.len() != 32 {
-        return Err(JsError::new("seed must be 32 bytes"));
-    }
-    let mut seed_arr = [0u8; 32];
-    seed_arr.copy_from_slice(seed);
-    let keypair =
-        crypto_primitives::AgentKeyDerivation::from_seed(&seed_arr, agent_index)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(WasmAgentKeyPair { inner: keypair })
-}
-
-#[wasm_bindgen(js_name = agentIdFromSeed)]
-pub fn agent_id_from_seed(seed: &[u8], agent_index: u32) -> Result<String, JsError> {
-    if seed.len() != 32 {
-        return Err(JsError::new("seed must be 32 bytes"));
-    }
-    let mut seed_arr = [0u8; 32];
-    seed_arr.copy_from_slice(seed);
-    let id = crypto_primitives::AgentKeyDerivation::agent_id_from_seed(&seed_arr, agent_index)
-        .map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(hex::encode(id))
-}
-
-// === AgentCipher wrapper ===
-
-#[wasm_bindgen]
-pub struct WasmAgentCipher {
-    inner: crypto_primitives::AgentCipher,
-}
-
-#[wasm_bindgen]
-impl WasmAgentCipher {
-    #[wasm_bindgen(constructor)]
-    pub fn new(shared_secret: &[u8]) -> Result<WasmAgentCipher, JsError> {
-        if shared_secret.len() != 32 {
-            return Err(JsError::new("shared secret must be 32 bytes"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(shared_secret);
-        Ok(WasmAgentCipher {
-            inner: crypto_primitives::AgentCipher::new(&arr),
-        })
-    }
-
-    #[wasm_bindgen(js_name = "fromKey")]
-    pub fn from_key(key: &[u8]) -> Result<WasmAgentCipher, JsError> {
-        if key.len() != 32 {
-            return Err(JsError::new("key must be 32 bytes"));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(key);
-        Ok(WasmAgentCipher {
-            inner: crypto_primitives::AgentCipher::from_key(arr),
-        })
-    }
-
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
-        self.inner
-            .encrypt(plaintext)
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, JsError> {
-        self.inner
-            .decrypt(data)
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    #[wasm_bindgen(js_name = "encryptHex")]
-    pub fn encrypt_hex(&self, plaintext: &[u8]) -> Result<String, JsError> {
-        self.inner
-            .encrypt_hex(plaintext)
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    #[wasm_bindgen(js_name = "decryptHex")]
-    pub fn decrypt_hex(&self, hex_str: &str) -> Result<Vec<u8>, JsError> {
-        self.inner
-            .decrypt_hex(hex_str)
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-}
-
 // === Memo encoding/decoding ===
 
 #[wasm_bindgen(js_name = "encodeMemos")]
-pub fn js_encode_memos(
-    data: &[u8],
-    msg_type: u8,
-    session_id: &[u8],
-) -> Result<Vec<u8>, JsError> {
+pub fn js_encode_memos(data: &[u8], msg_type: u8, session_id: &[u8]) -> Result<Vec<u8>, JsError> {
     let mt = memo_codec::MessageType::try_from(msg_type)
         .map_err(|_| JsError::new(&format!("invalid message type: 0x{:02X}", msg_type)))?;
     let sid = to_session_id(session_id)?;
-    let memos = memo_codec::chunk_message(data, mt, &sid)
-        .map_err(|e| JsError::new(&e.to_string()))?;
+    let memos = memo_codec::chunk_message(data, mt, &sid).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(flatten_memos(&memos))
 }
 
@@ -338,24 +117,20 @@ pub fn js_decode_memos(flat_memos: &[u8]) -> Result<JsValue, JsError> {
 
 #[wasm_bindgen(js_name = "createHandshake")]
 pub fn js_create_handshake(
-    keypair: &WasmAgentKeyPair,
+    agent_id: &str,
     capabilities: JsValue,
 ) -> Result<JsValue, JsError> {
     let caps: Vec<String> = serde_wasm_bindgen::from_value(capabilities)
         .map_err(|e| JsError::new(&e.to_string()))?;
     let cap_refs: Vec<&str> = caps.iter().map(|s| s.as_str()).collect();
-    let handshake = agent_protocol::create_handshake(&keypair.inner, &cap_refs);
+    let handshake = agent_protocol::create_handshake(agent_id, &cap_refs);
     serde_wasm_bindgen::to_value(&handshake).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[wasm_bindgen(js_name = "encodeHandshake")]
-pub fn js_encode_handshake(
-    handshake_json: JsValue,
-    session_id: &[u8],
-) -> Result<Vec<u8>, JsError> {
-    let handshake: agent_protocol::AgentHandshake =
-        serde_wasm_bindgen::from_value(handshake_json)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+pub fn js_encode_handshake(handshake_json: JsValue, session_id: &[u8]) -> Result<Vec<u8>, JsError> {
+    let handshake: agent_protocol::AgentHandshake = serde_wasm_bindgen::from_value(handshake_json)
+        .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
     let memos = agent_protocol::encode_handshake(&handshake, &sid)
         .map_err(|e| JsError::new(&e.to_string()))?;
@@ -365,22 +140,22 @@ pub fn js_encode_handshake(
 #[wasm_bindgen(js_name = "decodeHandshake")]
 pub fn js_decode_handshake(flat_memos: &[u8]) -> Result<JsValue, JsError> {
     let memos = unflatten_memos(flat_memos)?;
-    let handshake =
-        agent_protocol::decode_handshake(&memos).map_err(|e| JsError::new(&e.to_string()))?;
+    let handshake = agent_protocol::decode_handshake(&memos).map_err(|e| JsError::new(&e.to_string()))?;
     serde_wasm_bindgen::to_value(&handshake).map_err(|e| JsError::new(&e.to_string()))
 }
 
-#[wasm_bindgen(js_name = "completeHandshake")]
-pub fn js_complete_handshake(
-    keypair: &WasmAgentKeyPair,
-    handshake_json: JsValue,
-) -> Result<Vec<u8>, JsError> {
-    let handshake: agent_protocol::AgentHandshake =
-        serde_wasm_bindgen::from_value(handshake_json)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-    let secret = agent_protocol::complete_handshake(&keypair.inner, &handshake)
+// === Key derivation ===
+
+#[wasm_bindgen(js_name = "deriveAgentId")]
+pub fn js_derive_agent_id(seed: &[u8], agent_index: u32) -> Result<String, JsError> {
+    if seed.len() != 32 {
+        return Err(JsError::new("seed must be 32 bytes"));
+    }
+    let mut seed_arr = [0u8; 32];
+    seed_arr.copy_from_slice(seed);
+    let id = crypto_primitives::AgentKeyDerivation::agent_id_from_seed(&seed_arr, agent_index)
         .map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(secret.to_vec())
+    Ok(hex::encode(id))
 }
 
 // === Task/Bounty ===
@@ -399,10 +174,7 @@ pub fn js_encode_task_assignment(
 }
 
 #[wasm_bindgen(js_name = "encodeTaskProof")]
-pub fn js_encode_task_proof(
-    proof_json: JsValue,
-    session_id: &[u8],
-) -> Result<Vec<u8>, JsError> {
+pub fn js_encode_task_proof(proof_json: JsValue, session_id: &[u8]) -> Result<Vec<u8>, JsError> {
     let proof: agent_protocol::TaskProof = serde_wasm_bindgen::from_value(proof_json)
         .map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
@@ -417,8 +189,7 @@ pub fn js_encode_payment_confirmation(
     session_id: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let payment: agent_protocol::PaymentConfirmation =
-        serde_wasm_bindgen::from_value(payment_json)
-            .map_err(|e| JsError::new(&e.to_string()))?;
+        serde_wasm_bindgen::from_value(payment_json).map_err(|e| JsError::new(&e.to_string()))?;
     let sid = to_session_id(session_id)?;
     let memos = agent_protocol::encode_payment_confirmation(&payment, &sid)
         .map_err(|e| JsError::new(&e.to_string()))?;
@@ -428,28 +199,22 @@ pub fn js_encode_payment_confirmation(
 #[wasm_bindgen(js_name = "decodeTaskMessage")]
 pub fn js_decode_task_message(flat_memos: &[u8]) -> Result<JsValue, JsError> {
     let memos = unflatten_memos(flat_memos)?;
-    let task_msg =
-        agent_protocol::decode_task_message(&memos).map_err(|e| JsError::new(&e.to_string()))?;
+    let task_msg = agent_protocol::decode_task_message(&memos).map_err(|e| JsError::new(&e.to_string()))?;
 
     let obj = js_sys::Object::new();
     match task_msg {
         agent_protocol::TaskMessage::Assignment(t) => {
-            js_sys::Reflect::set(&obj, &"type".into(), &"assignment".into())
-                .map_err(jsval_err)?;
-            let data =
-                serde_wasm_bindgen::to_value(&t).map_err(|e| JsError::new(&e.to_string()))?;
+            js_sys::Reflect::set(&obj, &"type".into(), &"assignment".into()).map_err(jsval_err)?;
+            let data = serde_wasm_bindgen::to_value(&t).map_err(|e| JsError::new(&e.to_string()))?;
             js_sys::Reflect::set(&obj, &"data".into(), &data).map_err(jsval_err)?;
         }
         agent_protocol::TaskMessage::Proof(p) => {
-            js_sys::Reflect::set(&obj, &"type".into(), &"proof".into())
-                .map_err(jsval_err)?;
-            let data =
-                serde_wasm_bindgen::to_value(&p).map_err(|e| JsError::new(&e.to_string()))?;
+            js_sys::Reflect::set(&obj, &"type".into(), &"proof".into()).map_err(jsval_err)?;
+            let data = serde_wasm_bindgen::to_value(&p).map_err(|e| JsError::new(&e.to_string()))?;
             js_sys::Reflect::set(&obj, &"data".into(), &data).map_err(jsval_err)?;
         }
         agent_protocol::TaskMessage::Payment(p) => {
-            js_sys::Reflect::set(&obj, &"type".into(), &"payment".into())
-                .map_err(jsval_err)?;
+            js_sys::Reflect::set(&obj, &"type".into(), &"payment".into()).map_err(jsval_err)?;
             let data =
                 serde_wasm_bindgen::to_value(&p).map_err(|e| JsError::new(&e.to_string()))?;
             js_sys::Reflect::set(&obj, &"data".into(), &data).map_err(jsval_err)?;
@@ -465,12 +230,9 @@ pub fn js_create_task_proof(
     proof_data: &[u8],
     timestamp: f64,
 ) -> Result<JsValue, JsError> {
-    let proof =
-        agent_protocol::create_task_proof(task_id, action, proof_data, timestamp as u64);
+    let proof = agent_protocol::create_task_proof(task_id, action, proof_data, timestamp as u64);
     serde_wasm_bindgen::to_value(&proof).map_err(|e| JsError::new(&e.to_string()))
 }
-
-// === Version ===
 
 #[wasm_bindgen]
 pub fn version() -> String {
@@ -479,7 +241,6 @@ pub fn version() -> String {
 
 // === Helpers (not exported) ===
 
-/// Convert a JsValue error (from js_sys::Reflect) into a JsError.
 fn jsval_err(val: JsValue) -> JsError {
     JsError::new(&format!("{:?}", val))
 }

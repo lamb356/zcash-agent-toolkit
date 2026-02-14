@@ -1,190 +1,258 @@
 use std::collections::HashMap;
 
-use crypto_primitives::AgentCipher;
-use memo_codec::{chunk_message, decode_chunked_message, MessageType, MEMO_SIZE};
-
 use crate::ProtocolError;
 
-/// Manages multiple concurrent encrypted conversations.
-///
-/// Each session is identified by a 16-byte session ID and has its own
-/// `AgentCipher` for encryption/decryption.
-#[derive(Default)]
+/// Information tracked for an active peer conversation.
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    /// The peer's deterministic agent identifier.
+    pub peer_agent_id: String,
+    /// Capabilities advertised by the peer in the handshake.
+    pub capabilities: Vec<String>,
+    /// Creation timestamp for the session.
+    pub created_at: u64,
+}
+
+/// Tracks active protocol sessions by session id.
+#[derive(Debug, Default)]
 pub struct ConversationManager {
-    /// Map from session_id to cipher for that session.
-    ciphers: HashMap<[u8; 16], AgentCipher>,
+    sessions: HashMap<[u8; 16], SessionInfo>,
+    max_sessions: usize,
 }
 
 impl ConversationManager {
-    /// Create a new empty conversation manager.
+    /// Create a new conversation manager with a default capacity limit.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_max_sessions(100)
     }
 
-    /// Register a cipher for a session (typically called after handshake completes).
-    ///
-    /// Returns an error if a session with this ID is already registered.
-    /// Use `replace_session` for explicit replacement.
-    pub fn register_session(&mut self, session_id: [u8; 16], cipher: AgentCipher) -> Result<(), ProtocolError> {
-        if self.ciphers.contains_key(&session_id) {
+    /// Create a new conversation manager with an explicit capacity limit.
+    pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            max_sessions,
+        }
+    }
+
+    /// Register a peer session from decoded handshake information.
+    pub fn register_session(
+        &mut self,
+        session_id: [u8; 16],
+        peer_agent_id: String,
+        capabilities: Vec<String>,
+        created_at: u64,
+    ) -> Result<(), ProtocolError> {
+        if self.sessions.contains_key(&session_id) {
             return Err(ProtocolError::SessionAlreadyExists);
         }
-        self.ciphers.insert(session_id, cipher);
+
+        if self.sessions.len() >= self.max_sessions && !self.sessions.is_empty() {
+            let mut oldest = None;
+            for (id, info) in &self.sessions {
+                match oldest {
+                    Some((oldest_created_at, _)) if oldest_created_at <= info.created_at => {}
+                    _ => oldest = Some((info.created_at, *id)),
+                }
+            }
+            if let Some((_, oldest_id)) = oldest {
+                self.sessions.remove(&oldest_id);
+            }
+        }
+
+        self.sessions.insert(
+            session_id,
+            SessionInfo {
+                peer_agent_id,
+                capabilities,
+                created_at,
+            },
+        );
         Ok(())
     }
 
-    /// Explicitly replace the cipher for an existing session.
-    pub fn replace_session(&mut self, session_id: [u8; 16], cipher: AgentCipher) {
-        self.ciphers.insert(session_id, cipher);
+    /// Read-only lookup of an active session.
+    pub fn get_session(&self, session_id: &[u8; 16]) -> Option<&SessionInfo> {
+        self.sessions.get(session_id)
     }
 
-    /// Encrypt and chunk a message for sending.
-    ///
-    /// Returns a vector of 512-byte memos ready to be sent as Zcash memo fields.
-    pub fn send_message(
-        &self,
-        session_id: &[u8; 16],
-        msg_type: MessageType,
-        plaintext: &[u8],
-    ) -> Result<Vec<[u8; MEMO_SIZE]>, ProtocolError> {
-        let cipher = self
-            .ciphers
-            .get(session_id)
-            .ok_or(ProtocolError::UnknownSession)?;
-        let encrypted = cipher.encrypt(plaintext).map_err(ProtocolError::Cipher)?;
-        chunk_message(&encrypted, msg_type, session_id).map_err(ProtocolError::Memo)
+    /// Remove and return a session from tracking.
+    pub fn remove_session(&mut self, session_id: &[u8; 16]) -> Option<SessionInfo> {
+        self.sessions.remove(session_id)
     }
 
-    /// Decrypt and reassemble received memos.
-    ///
-    /// Returns the message type and decrypted plaintext.
-    pub fn receive_message(
-        &self,
-        memos: &[[u8; MEMO_SIZE]],
-    ) -> Result<(MessageType, Vec<u8>), ProtocolError> {
-        let msg = decode_chunked_message(memos).map_err(ProtocolError::Memo)?;
-        let cipher = self
-            .ciphers
-            .get(&msg.session_id)
-            .ok_or(ProtocolError::UnknownSession)?;
-        let plaintext = cipher.decrypt(&msg.data).map_err(ProtocolError::Cipher)?;
-        Ok((msg.msg_type, plaintext))
+    /// Return all active session identifiers.
+    pub fn list_sessions(&self) -> Vec<[u8; 16]> {
+        self.sessions.keys().copied().collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crypto_primitives::{AgentKeyPair, generate_session_id};
+    use crypto_primitives::{generate_session_id, random_bytes_array};
 
-    /// Helper: create two agents, perform DH, and return (session_id, manager_a, manager_b).
-    fn setup_conversation() -> ([u8; 16], ConversationManager, ConversationManager) {
-        let alice = AgentKeyPair::generate();
-        let bob = AgentKeyPair::generate();
-
-        let shared_secret = alice.diffie_hellman(&bob.public_key_bytes());
+    #[test]
+    fn register_and_get_session() {
+        let mut manager = ConversationManager::new();
         let session_id = generate_session_id().unwrap();
+        let created_at = 1_700_000_000u64;
 
-        let mut mgr_a = ConversationManager::new();
-        let mut mgr_b = ConversationManager::new();
+        manager
+            .register_session(
+                session_id,
+                "agent-b".to_string(),
+                vec!["task".to_string()],
+                created_at,
+            )
+            .expect("register");
 
-        mgr_a.register_session(session_id, AgentCipher::new(&shared_secret)).unwrap();
-        mgr_b.register_session(session_id, AgentCipher::new(&shared_secret)).unwrap();
-
-        (session_id, mgr_a, mgr_b)
+        let session = manager.get_session(&session_id).expect("session should exist");
+        assert_eq!(session.peer_agent_id, "agent-b");
+        assert_eq!(session.capabilities, vec!["task"]);
+        assert_eq!(session.created_at, created_at);
     }
 
     #[test]
-    fn send_receive_roundtrip() {
-        let (session_id, mgr_a, mgr_b) = setup_conversation();
+    fn duplicate_session_is_rejected() {
+        let mut manager = ConversationManager::new();
+        let session_id = generate_session_id().unwrap();
+        let created_at = 1_700_000_000u64;
 
-        let plaintext = b"Hello from Alice to Bob!";
-        let memos = mgr_a
-            .send_message(&session_id, MessageType::Text, plaintext)
-            .expect("send");
-
-        let (msg_type, decrypted) = mgr_b.receive_message(&memos).expect("receive");
-        assert_eq!(msg_type, MessageType::Text);
-        assert_eq!(decrypted, plaintext);
+        manager
+            .register_session(
+                session_id,
+                "agent-b".to_string(),
+                vec!["task".to_string()],
+                created_at,
+            )
+            .expect("first");
+        let err = manager.register_session(
+            session_id,
+            "agent-c".to_string(),
+            vec!["text".to_string()],
+            created_at,
+        );
+        assert!(matches!(err, Err(ProtocolError::SessionAlreadyExists)));
     }
 
     #[test]
-    fn two_sessions_decrypt_only_own_messages() {
-        let alice = AgentKeyPair::generate();
-        let bob = AgentKeyPair::generate();
-        let carol = AgentKeyPair::generate();
+    fn remove_session() {
+        let mut manager = ConversationManager::new();
+        let session_id = generate_session_id().unwrap();
+        manager
+            .register_session(
+                session_id,
+                "agent-b".to_string(),
+                vec!["task".to_string()],
+                1,
+            )
+            .expect("register");
+        assert!(manager.get_session(&session_id).is_some());
 
-        let secret_ab = alice.diffie_hellman(&bob.public_key_bytes());
-        let secret_ac = alice.diffie_hellman(&carol.public_key_bytes());
-
-        let session_ab = generate_session_id().unwrap();
-        let session_ac = generate_session_id().unwrap();
-
-        let mut mgr_alice = ConversationManager::new();
-        mgr_alice.register_session(session_ab, AgentCipher::new(&secret_ab)).unwrap();
-        mgr_alice.register_session(session_ac, AgentCipher::new(&secret_ac)).unwrap();
-
-        let mut mgr_bob = ConversationManager::new();
-        mgr_bob.register_session(session_ab, AgentCipher::new(&secret_ab)).unwrap();
-
-        let mut mgr_carol = ConversationManager::new();
-        mgr_carol.register_session(session_ac, AgentCipher::new(&secret_ac)).unwrap();
-
-        // Alice sends to Bob
-        let msg_to_bob = b"Secret for Bob";
-        let memos_bob = mgr_alice
-            .send_message(&session_ab, MessageType::Text, msg_to_bob)
-            .expect("send to bob");
-
-        // Alice sends to Carol
-        let msg_to_carol = b"Secret for Carol";
-        let memos_carol = mgr_alice
-            .send_message(&session_ac, MessageType::Command, msg_to_carol)
-            .expect("send to carol");
-
-        // Bob can decrypt his message
-        let (_, dec_bob) = mgr_bob.receive_message(&memos_bob).expect("bob receives");
-        assert_eq!(dec_bob, msg_to_bob);
-
-        // Carol can decrypt her message
-        let (_, dec_carol) = mgr_carol
-            .receive_message(&memos_carol)
-            .expect("carol receives");
-        assert_eq!(dec_carol, msg_to_carol);
-
-        // Carol cannot decrypt Bob's message (unknown session for her)
-        let result = mgr_carol.receive_message(&memos_bob);
-        assert!(result.is_err());
+        let removed = manager.remove_session(&session_id);
+        assert!(removed.is_some());
+        assert!(manager.get_session(&session_id).is_none());
     }
 
     #[test]
-    fn unknown_session_returns_error() {
-        let mgr = ConversationManager::new();
-        let unknown_session = generate_session_id().unwrap();
+    fn list_sessions() {
+        let mut manager = ConversationManager::with_max_sessions(4);
+        let session_a = generate_session_id().unwrap();
+        let session_b = generate_session_id().unwrap();
+        let session_c = generate_session_id().unwrap();
 
-        let result = mgr.send_message(&unknown_session, MessageType::Text, b"test");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ProtocolError::UnknownSession => {}
-            other => panic!("expected UnknownSession, got: {other:?}"),
-        }
+        manager
+            .register_session(
+                session_a,
+                "a".to_string(),
+                vec!["text".to_string()],
+                1,
+            )
+            .expect("session a");
+        manager
+            .register_session(
+                session_b,
+                "b".to_string(),
+                vec!["text".to_string()],
+                2,
+            )
+            .expect("session b");
+        manager
+            .register_session(
+                session_c,
+                "c".to_string(),
+                vec!["text".to_string()],
+                3,
+            )
+            .expect("session c");
+
+        let sessions = manager.list_sessions();
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions.contains(&session_a));
+        assert!(sessions.contains(&session_b));
+        assert!(sessions.contains(&session_c));
     }
 
     #[test]
-    fn large_message_roundtrip() {
-        let (session_id, mgr_a, mgr_b) = setup_conversation();
+    fn max_sessions_eviction_removes_oldest() {
+        let mut manager = ConversationManager::with_max_sessions(2);
+        let session_a = generate_session_id().unwrap();
+        let session_b = generate_session_id().unwrap();
+        let session_c = generate_session_id().unwrap();
 
-        // 5 KB message -- will produce multiple chunks after encryption overhead
-        let plaintext: Vec<u8> = (0..5000).map(|i| (i % 256) as u8).collect();
-        let memos = mgr_a
-            .send_message(&session_id, MessageType::Command, &plaintext)
-            .expect("send large");
+        manager
+            .register_session(
+                session_a,
+                "a".to_string(),
+                vec!["text".to_string()],
+                100,
+            )
+            .unwrap();
+        manager
+            .register_session(
+                session_b,
+                "b".to_string(),
+                vec!["text".to_string()],
+                200,
+            )
+            .unwrap();
+        assert_eq!(manager.list_sessions().len(), 2);
 
-        // Should require multiple memos due to encryption overhead
-        assert!(memos.len() > 1);
+        manager
+            .register_session(
+                session_c,
+                "c".to_string(),
+                vec!["text".to_string()],
+                50,
+            )
+            .unwrap();
+        assert_eq!(manager.list_sessions().len(), 2);
+        assert!(manager.get_session(&session_a).is_none());
+        assert!(manager.get_session(&session_b).is_some());
+        assert!(manager.get_session(&session_c).is_some());
+    }
 
-        let (msg_type, decrypted) = mgr_b.receive_message(&memos).expect("receive large");
-        assert_eq!(msg_type, MessageType::Command);
-        assert_eq!(decrypted, plaintext);
+    #[test]
+    fn max_sessions_eviction_uses_oldest_created_at() {
+        let mut manager = ConversationManager::with_max_sessions(2);
+        let random = random_bytes_array::<16>().unwrap();
+        let mut older = random;
+        older[0] = 0;
+        let mut newer = random;
+        newer[0] = 1;
+
+        manager
+            .register_session(older, "a".to_string(), vec!["text".to_string()], 5)
+            .unwrap();
+        manager
+            .register_session(newer, "b".to_string(), vec!["text".to_string()], 10)
+            .unwrap();
+        manager
+            .register_session([1u8; 16], "c".to_string(), vec!["text".to_string()], 7)
+            .unwrap();
+
+        assert_eq!(manager.list_sessions().len(), 2);
+        assert!(manager.get_session(&older).is_none());
+        assert!(manager.get_session(&newer).is_some());
     }
 }
